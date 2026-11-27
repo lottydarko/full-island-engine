@@ -3552,4 +3552,24 @@ export function findNearbyFrontCarCallRoute(
   return findRoadCallRoute(upstream.x, upstream.z, goalProj.x, goalProj.z);
 }
 
+// =========================================================================
+// PEDESTRIAN POSTER PILLARS (TOTEMS) AT PLAZA & METRO-TRANSFER STOPS
+// Placed cleanly on sidewalks/plazas near bs_5, bs_10, bs_11, bs_13
+// =========================================================================
+export interface PosterPillarSpec {
+  id: string;
+  x: number;
+  z: number;
+  rotY: number;
+}
 
+export const POSTER_PILLARS: PosterPillarSpec[] = [
+  // bs_5 — Soviet Monument Plaza (west plaza sidewalk, clear of East Ave & d2_uv_1)
+  { id: 'pp_bs_5', x: m2w(211.5), z: m2w(-23.5), rotY: 0 },
+  // bs_10 — Metro Transfer · North Gate (north promenade sidewalk beside shelter)
+  { id: 'pp_bs_10', x: m2w(23.5), z: m2w(-727), rotY: -Math.PI * 0.5 },
+  // bs_11 — Metro Transfer · West Promenade (promenade plaza beside shelter)
+  { id: 'pp_bs_11', x: m2w(-735), z: m2w(-207), rotY: -Math.PI * 0.5 },
+  // bs_13 — Metro Transfer · NE Sector 2 (west transfer plaza clear of coastal road)
+  { id: 'pp_bs_13', x: m2w(712), z: m2w(-496.5), rotY: Math.PI * 0.5 },
+];
