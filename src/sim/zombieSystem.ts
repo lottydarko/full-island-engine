@@ -75,6 +75,9 @@ export function evaluateZombieState(
 
 export interface ZombieAgent {
   id: number;
+  faceId: string;
+  fabricId: string;
+  voiceSeed: number;
   zone: ZombieZoneKind;
   districtId: string;
   x: number;
@@ -93,6 +96,10 @@ export interface ZombieAgent {
   isSprinter: boolean;
   isCrawler: boolean;
   detectRadius: number;
+  suspicion: number;
+  loseSightTimer: number;
+  alertBannerTimer: number;
+  lungeBoost: number;
   alerted: boolean;
   attackState: 'none' | 'windup' | 'active' | 'recover' | 'execute';
   attackTimer: number;
@@ -106,6 +113,7 @@ export interface ZombieAgent {
   mixer: THREE.AnimationMixer | null;
   actions: Partial<Record<ZombieClipKey, THREE.AnimationAction>>;
   activeAction: THREE.AnimationAction | null;
+  suspicionSprite?: THREE.Sprite;
 }
 
 export interface ZombiePlayerContext {
@@ -213,6 +221,76 @@ function buildClipForModel(
   return new THREE.AnimationClip(`z_${clipKey}`, sourceClip.duration, tracks);
 }
 
+let _zQuestionTextures: THREE.CanvasTexture[] | null = null;
+let _zAlertBangTexture: THREE.CanvasTexture | null = null;
+
+function getZombieSuspicionTextures(): {
+  questionSteps: THREE.CanvasTexture[];
+  alertBang: THREE.CanvasTexture;
+} {
+  if (_zQuestionTextures && _zAlertBangTexture) {
+    return { questionSteps: _zQuestionTextures, alertBang: _zAlertBangTexture };
+  }
+  const steps: THREE.CanvasTexture[] = [];
+  for (let s = 0; s <= 10; s++) {
+    const frac = s / 10;
+    const c = document.createElement('canvas');
+    c.width = 96;
+    c.height = 96;
+    const ctx = c.getContext('2d')!;
+    ctx.fillStyle = 'rgba(12, 16, 20, 0.76)';
+    ctx.beginPath();
+    ctx.arc(48, 48, 36, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = frac > 0.72 ? '#b91c1c' : frac > 0.35 ? '#d97706' : '#94a3b8';
+    ctx.lineWidth = 4;
+    ctx.stroke();
+
+    ctx.font = 'bold 54px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.32)';
+    ctx.fillText('?', 48, 50);
+
+    if (frac > 0.01) {
+      const topY = 80 - frac * 64;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, topY, 96, 96 - topY);
+      ctx.clip();
+      ctx.fillStyle = frac > 0.75 ? '#ef4444' : frac > 0.4 ? '#f59e0b' : '#fde047';
+      ctx.fillText('?', 48, 50);
+      ctx.restore();
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    steps.push(tex);
+  }
+
+  const ac = document.createElement('canvas');
+  ac.width = 96;
+  ac.height = 96;
+  const actx = ac.getContext('2d')!;
+  actx.fillStyle = 'rgba(105, 16, 24, 0.92)';
+  actx.beginPath();
+  actx.arc(48, 48, 36, 0, Math.PI * 2);
+  actx.fill();
+  actx.strokeStyle = '#fca5a5';
+  actx.lineWidth = 4;
+  actx.stroke();
+  actx.font = 'bold 56px sans-serif';
+  actx.textAlign = 'center';
+  actx.textBaseline = 'middle';
+  actx.fillStyle = '#fef2f2';
+  actx.fillText('!', 48, 50);
+  const aTex = new THREE.CanvasTexture(ac);
+  aTex.colorSpace = THREE.SRGBColorSpace;
+
+  _zQuestionTextures = steps;
+  _zAlertBangTexture = aTex;
+  return { questionSteps: steps, alertBang: aTex };
+}
+
 export function buildZombieSystem(
   collisionWorld: CollisionWorld,
   seed = 71059
@@ -224,6 +302,93 @@ export function buildZombieSystem(
   const agents: ZombieAgent[] = [];
   const audioPools = new Map<ZombieAudioKey, HTMLAudioElement[]>();
   const lastAudioTime: Partial<Record<ZombieAudioKey, number>> = {};
+  const { questionSteps: zQuestionSteps, alertBang: zAlertBang } = getZombieSuspicionTextures();
+
+  // Pooled realistic dark-maroon blood bursts & persistent growing ground pools (zero-GC)
+  const MAX_BLOOD_BURSTS = 128;
+  const MAX_BLOOD_POOLS = 64;
+  const bloodBurstGeo = new THREE.SphereGeometry(0.048, 6, 5);
+  const bloodBurstMat = new THREE.MeshStandardMaterial({
+    color: '#4a0810',
+    roughness: 0.24,
+    metalness: 0.08,
+  });
+  const bloodBurstInst = new THREE.InstancedMesh(bloodBurstGeo, bloodBurstMat, MAX_BLOOD_BURSTS);
+  bloodBurstInst.frustumCulled = false;
+  root.add(bloodBurstInst);
+
+  const bloodPoolGeo = new THREE.CircleGeometry(1, 14);
+  bloodPoolGeo.rotateX(-Math.PI * 0.5);
+  const bloodPoolMat = new THREE.MeshStandardMaterial({
+    color: '#3b060c',
+    roughness: 0.14,
+    metalness: 0.12,
+    transparent: true,
+    opacity: 0.88,
+    depthWrite: false,
+  });
+  const bloodPoolInst = new THREE.InstancedMesh(bloodPoolGeo, bloodPoolMat, MAX_BLOOD_POOLS);
+  bloodPoolInst.frustumCulled = false;
+  root.add(bloodPoolInst);
+
+  const bPosX = new Float32Array(MAX_BLOOD_BURSTS);
+  const bPosY = new Float32Array(MAX_BLOOD_BURSTS);
+  const bPosZ = new Float32Array(MAX_BLOOD_BURSTS);
+  const bVelX = new Float32Array(MAX_BLOOD_BURSTS);
+  const bVelY = new Float32Array(MAX_BLOOD_BURSTS);
+  const bVelZ = new Float32Array(MAX_BLOOD_BURSTS);
+  const bLife = new Float32Array(MAX_BLOOD_BURSTS);
+  const bMaxLife = new Float32Array(MAX_BLOOD_BURSTS);
+  const bScale = new Float32Array(MAX_BLOOD_BURSTS);
+  let burstCursor = 0;
+
+  const pPosX = new Float32Array(MAX_BLOOD_POOLS);
+  const pPosY = new Float32Array(MAX_BLOOD_POOLS);
+  const pPosZ = new Float32Array(MAX_BLOOD_POOLS);
+  const pAge = new Float32Array(MAX_BLOOD_POOLS);
+  const pMaxRadius = new Float32Array(MAX_BLOOD_POOLS);
+  const pYaw = new Float32Array(MAX_BLOOD_POOLS);
+  let poolCursor = 0;
+  let activeBursts = 0;
+  let growingPools = 0;
+
+  const _bloodDummy = new THREE.Object3D();
+  _bloodDummy.position.set(0, -500, 0);
+  _bloodDummy.scale.setScalar(0.0001);
+  _bloodDummy.updateMatrix();
+  for (let i = 0; i < MAX_BLOOD_BURSTS; i++) bloodBurstInst.setMatrixAt(i, _bloodDummy.matrix);
+  for (let i = 0; i < MAX_BLOOD_POOLS; i++) bloodPoolInst.setMatrixAt(i, _bloodDummy.matrix);
+  bloodBurstInst.instanceMatrix.needsUpdate = true;
+  bloodPoolInst.instanceMatrix.needsUpdate = true;
+
+  function spawnBloodBurst(x: number, y: number, z: number, count: number, dirX = 0, dirZ = 0) {
+    for (let k = 0; k < count; k++) {
+      const slot = burstCursor++ % MAX_BLOOD_BURSTS;
+      const ang = (slot * 2.39996 + k * 0.8) % (Math.PI * 2);
+      const spd = 1.4 + ((slot * 17) % 10) * 0.24;
+      bPosX[slot] = x + Math.cos(ang) * 0.08;
+      bPosY[slot] = y;
+      bPosZ[slot] = z + Math.sin(ang) * 0.08;
+      bVelX[slot] = Math.cos(ang) * spd + dirX * 1.9;
+      bVelY[slot] = 1.2 + ((slot * 13) % 7) * 0.34;
+      bVelZ[slot] = Math.sin(ang) * spd + dirZ * 1.9;
+      bMaxLife[slot] = 0.42 + ((slot * 7) % 5) * 0.06;
+      bLife[slot] = bMaxLife[slot];
+      bScale[slot] = 0.75 + ((slot * 11) % 6) * 0.16;
+    }
+    activeBursts = MAX_BLOOD_BURSTS;
+  }
+
+  function spawnDeathBloodPool(x: number, y: number, z: number, radiusScale = 1.0) {
+    const slot = poolCursor++ % MAX_BLOOD_POOLS;
+    pPosX[slot] = x;
+    pPosY[slot] = y + 0.025;
+    pPosZ[slot] = z;
+    pAge[slot] = 0.001;
+    pMaxRadius[slot] = (0.64 + ((slot * 19) % 10) * 0.032) * radiusScale;
+    pYaw[slot] = (slot * 1.73) % (Math.PI * 2);
+    growingPools = MAX_BLOOD_POOLS;
+  }
 
   function playZombieSound(key: ZombieAudioKey, distM: number, volumeScale = 1.0) {
     if (typeof Audio === 'undefined' || distM > 52) return;
@@ -376,14 +541,41 @@ export function buildZombieSystem(
     agRoot.rotation.y = rng() * Math.PI * 2;
     agRoot.visible = !sp.dormant;
 
+    // Permanent spawn identity — rolled once at spawn and retained for life
+    let zHash = (seed ^ Math.imul(i + 1, 2654435761)) >>> 0;
+    zHash = Math.imul(zHash ^ (zHash >>> 15), 2246822519) >>> 0;
+    const voiceSeed = (zHash ^ Math.imul(i + 31, 3266489917)) >>> 0;
+    const faceIdx = Math.floor(rng() * 12);
+    const fabricIdx = Math.floor(rng() * 10);
+    const faceId = `zf:${faceIdx}:${voiceSeed & 255}`;
+    const fabricId = `zc:${sp.zone}:${fabricIdx}`;
+    agRoot.userData.spawnIdentity = { faceId, fabricId, voiceSeed };
+
     const proxy = new THREE.Mesh(fallbackGeo, fallbackMat);
     proxy.position.y = 0.85;
     proxy.name = 'ZombieProxy';
     agRoot.add(proxy);
+
+    const suspMat = new THREE.SpriteMaterial({
+      map: zQuestionSteps[0],
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const suspicionSprite = new THREE.Sprite(suspMat);
+    suspicionSprite.scale.set(0.58, 0.58, 1);
+    suspicionSprite.position.set(0, 2.08, 0);
+    suspicionSprite.visible = false;
+    suspicionSprite.renderOrder = 10;
+    agRoot.add(suspicionSprite);
+
     root.add(agRoot);
 
     agents.push({
       id: i,
+      faceId,
+      fabricId,
+      voiceSeed,
       zone: sp.zone,
       districtId: sp.districtId,
       x: sp.x,
@@ -402,6 +594,10 @@ export function buildZombieSystem(
       isSprinter: sp.isSprinter,
       isCrawler: false,
       detectRadius: sp.zone === 'ghetto' || sp.zone === 'outbreak' ? 24 : 18,
+      suspicion: sp.dormant ? 1 : 0,
+      loseSightTimer: 0,
+      alertBannerTimer: 0,
+      lungeBoost: 0,
       alerted: false,
       attackState: 'none',
       attackTimer: 0,
@@ -415,6 +611,7 @@ export function buildZombieSystem(
       mixer: null,
       actions: {},
       activeAction: null,
+      suspicionSprite,
     });
   }
 
@@ -527,7 +724,72 @@ export function buildZombieSystem(
   let nextOutbreakAt = 105;
   let outbreakEndAt = -1;
   let activeOutbreakDistrict: string | null = null;
+  let lastElapsedSeen = 0;
+  let frameCounter = 0;
   const _tmpVec = new THREE.Vector3();
+
+  // Never stack zombie outbreaks back-to-back with intense crew/heist world events
+  const unsubWorldBus = worldEventBus.subscribe((ev) => {
+    if (ev.type === 'crime' && ev.kind !== 'outbreak' && ev.severity >= 0.65) {
+      nextOutbreakAt = Math.max(nextOutbreakAt, lastElapsedSeen + 95);
+    }
+  });
+
+  function updateBloodPools(safeDt: number) {
+    if (activeBursts > 0) {
+      let aliveCount = 0;
+      for (let i = 0; i < MAX_BLOOD_BURSTS; i++) {
+        if (bLife[i] <= 0) continue;
+        bLife[i] -= safeDt;
+        if (bLife[i] <= 0) {
+          _bloodDummy.position.set(0, -500, 0);
+          _bloodDummy.scale.setScalar(0.0001);
+          _bloodDummy.updateMatrix();
+          bloodBurstInst.setMatrixAt(i, _bloodDummy.matrix);
+          continue;
+        }
+        aliveCount++;
+        bVelY[i] -= 13.5 * safeDt;
+        bPosX[i] += bVelX[i] * safeDt;
+        bPosY[i] += bVelY[i] * safeDt;
+        bPosZ[i] += bVelZ[i] * safeDt;
+        const ground = sampleGroundY(bPosX[i], bPosZ[i]);
+        if (bPosY[i] < ground + 0.02) {
+          bPosY[i] = ground + 0.02;
+          bVelX[i] *= 0.35;
+          bVelZ[i] *= 0.35;
+          bVelY[i] = 0;
+        }
+        const t = Math.max(0.1, bLife[i] / bMaxLife[i]);
+        _bloodDummy.position.set(bPosX[i], bPosY[i], bPosZ[i]);
+        _bloodDummy.rotation.set(0, 0, 0);
+        _bloodDummy.scale.set(bScale[i], bScale[i] * (0.7 + 0.5 * t), bScale[i]);
+        _bloodDummy.updateMatrix();
+        bloodBurstInst.setMatrixAt(i, _bloodDummy.matrix);
+      }
+      bloodBurstInst.instanceMatrix.needsUpdate = true;
+      if (aliveCount === 0) activeBursts = 0;
+    }
+
+    if (growingPools > 0) {
+      let stillGrowing = 0;
+      for (let i = 0; i < MAX_BLOOD_POOLS; i++) {
+        if (pAge[i] <= 0 || pAge[i] >= 2.8) continue;
+        pAge[i] = Math.min(2.8, pAge[i] + safeDt);
+        const u = pAge[i] / 2.8;
+        const eased = 1 - Math.pow(1 - u, 2.5);
+        const r = 0.16 + (pMaxRadius[i] - 0.16) * eased;
+        _bloodDummy.position.set(pPosX[i], pPosY[i], pPosZ[i]);
+        _bloodDummy.rotation.set(0, pYaw[i], 0);
+        _bloodDummy.scale.set(r, 1, r * 0.84);
+        _bloodDummy.updateMatrix();
+        bloodPoolInst.setMatrixAt(i, _bloodDummy.matrix);
+        if (pAge[i] < 2.8) stillGrowing++;
+      }
+      bloodPoolInst.instanceMatrix.needsUpdate = true;
+      if (stillGrowing === 0) growingPools = 0;
+    }
+  }
 
   function update(
     dt: number,
@@ -537,9 +799,13 @@ export function buildZombieSystem(
     onHitCivilian?: (pedId: string, damage: number, fromPos: THREE.Vector3) => void
   ) {
     const safeDt = Math.min(0.1, Math.max(0.001, dt));
+    lastElapsedSeen = elapsed;
+    frameCounter++;
     const px = playerCtx?.pos.x ?? 99999;
     const py = playerCtx?.pos.y ?? 0;
     const pz = playerCtx?.pos.z ?? 99999;
+
+    updateBloodPools(safeDt);
 
     // Outbreak scheduler (Intensity Spread: occasional, non-overlapping)
     if (activeOutbreakDistrict === null && elapsed >= nextOutbreakAt) {
@@ -553,7 +819,10 @@ export function buildZombieSystem(
           ag.alive = true;
           ag.dying = false;
           ag.hp = ag.maxHp;
+          ag.suspicion = 1;
           ag.alerted = true;
+          ag.loseSightTimer = 0;
+          ag.alertBannerTimer = 2.2;
           ag.root.visible = true;
           centerAgent = ag;
         }
@@ -591,16 +860,21 @@ export function buildZombieSystem(
         if (ag.zone === 'outbreak') {
           ag.dormant = true;
           ag.alerted = false;
+          ag.suspicion = 0;
+          ag.loseSightTimer = 0;
           ag.root.visible = false;
         }
       }
     }
 
     // Update each active zombie
-    for (const ag of agents) {
+    const agentCount = agents.length;
+    for (let i = 0; i < agentCount; i++) {
+      const ag = agents[i];
       if (ag.dormant) continue;
 
       if (ag.spotCooldown > 0) ag.spotCooldown -= safeDt;
+      if (ag.alertBannerTimer > 0) ag.alertBannerTimer = Math.max(0, ag.alertBannerTimer - safeDt);
 
       // Distance to nearest visible living target (player or nearby civilian)
       const distPlayer = Math.hypot(ag.x - px, ag.z - pz);
@@ -624,7 +898,10 @@ export function buildZombieSystem(
 
       if (!ag.alive) {
         ag.deathTimer += safeDt;
-        ag.mixer?.update(safeDt);
+        if (ag.suspicionSprite) ag.suspicionSprite.visible = false;
+        if (ag.deathTimer < 4.0) {
+          ag.mixer?.update(safeDt);
+        }
         continue;
       }
 
@@ -637,17 +914,33 @@ export function buildZombieSystem(
         }
       }
 
-      // Attack cycle progression
+      // Attack cycle progression with eased lunge boost
       if (ag.attackState !== 'none') {
         ag.attackTimer += safeDt;
-        if (ag.attackState === 'windup' && ag.attackTimer >= 0.34) {
-          ag.attackState = 'active';
-          ag.attackTimer = 0;
-          ag.swingDealt = false;
+        if (ag.attackState === 'windup') {
+          const wFrac = Math.min(1, ag.attackTimer / 0.34);
+          ag.lungeBoost = wFrac * wFrac * 1.4;
+          if (ag.attackTimer >= 0.34) {
+            ag.attackState = 'active';
+            ag.attackTimer = 0;
+            ag.swingDealt = false;
+          }
         } else if (ag.attackState === 'active') {
+          const aFrac = Math.min(1, ag.attackTimer / 0.28);
+          ag.lungeBoost = (1 - aFrac) * 4.2;
           if (!ag.swingDealt && ag.attackTimer >= 0.12) {
             ag.swingDealt = true;
             if (targetDist <= 2.35) {
+              const hitDirX = (targetX - ag.x) / Math.max(0.1, targetDist);
+              const hitDirZ = (targetZ - ag.z) / Math.max(0.1, targetDist);
+              spawnBloodBurst(
+                targetX - hitDirX * 0.25,
+                ag.y + 1.15,
+                targetZ - hitDirZ * 0.25,
+                8,
+                hitDirX,
+                hitDirZ
+              );
               if (targetCivId && onHitCivilian) {
                 _tmpVec.set(ag.x, ag.y + 1.0, ag.z);
                 onHitCivilian(targetCivId, 24, _tmpVec);
@@ -662,33 +955,84 @@ export function buildZombieSystem(
           if (ag.attackTimer >= 0.28) {
             ag.attackState = 'recover';
             ag.attackTimer = 0;
+            ag.lungeBoost = 0;
           }
-        } else if (ag.attackState === 'recover' && ag.attackTimer >= 0.48) {
-          ag.attackState = 'none';
-          ag.attackTimer = 0;
+        } else if (ag.attackState === 'recover') {
+          ag.lungeBoost = 0;
+          if (ag.attackTimer >= 0.48) {
+            ag.attackState = 'none';
+            ag.attackTimer = 0;
+          }
         }
-      } else if (targetDist <= 1.85 && Math.abs(ag.y - py) < 2.6) {
-        ag.attackState = 'windup';
-        ag.attackTimer = 0;
-        ag.swingDealt = false;
+      } else {
+        ag.lungeBoost = 0;
+        if (targetDist <= 2.1 && Math.abs(ag.y - py) < 2.6 && (ag.alerted || targetCivId !== null)) {
+          ag.attackState = 'windup';
+          ag.attackTimer = 0;
+          ag.swingDealt = false;
+        }
       }
 
-      // Spot reaction
-      const wasAlerted = ag.alerted;
-      if (targetDist <= ag.detectRadius) {
-        ag.alerted = true;
-        if (!wasAlerted && ag.spotCooldown <= 0) {
-          ag.spotCooldown = 8;
-          playZombieSound('spot', distPlayer, 0.9);
+      // Gradual "?" detection law (builds in LOS/cone, drains on LOS break, chase cooldown)
+      const toTx = targetX - ag.x;
+      const toTz = targetZ - ag.z;
+      const fwdX = Math.sin(ag.yaw);
+      const fwdZ = Math.cos(ag.yaw);
+      const dot = targetDist > 0.05 ? (toTx * fwdX + toTz * fwdZ) / targetDist : 1;
+      const inCone = dot >= 0.24 || targetDist < 5.0 || ag.alerted;
+      const hasTargetLos =
+        targetDist <= ag.detectRadius &&
+        inCone &&
+        collisionWorld.hasLineOfSight(ag.x, ag.z, targetX, targetZ);
+
+      if (hasTargetLos) {
+        ag.loseSightTimer = 0;
+        if (!ag.alerted) {
+          const proxFactor = Math.max(0.28, 1.35 - targetDist / Math.max(1, ag.detectRadius));
+          ag.suspicion = Math.min(1, ag.suspicion + safeDt * proxFactor * 0.85);
+          if (ag.suspicion >= 1) {
+            ag.alerted = true;
+            ag.alertBannerTimer = 2.1;
+            if (ag.spotCooldown <= 0) {
+              ag.spotCooldown = 8;
+              playZombieSound('spot', distPlayer, 0.9);
+            }
+          }
         }
-      } else if (targetDist > ag.detectRadius * 1.85 && ag.zone !== 'outbreak') {
-        ag.alerted = false;
+      } else {
+        if (!ag.alerted) {
+          ag.suspicion = Math.max(0, ag.suspicion - safeDt * 0.34);
+        } else if (targetDist > ag.detectRadius * 1.45 && ag.zone !== 'outbreak') {
+          ag.loseSightTimer += safeDt;
+          if (ag.loseSightTimer >= 4.5 && targetDist > ag.detectRadius * 1.65) {
+            ag.alerted = false;
+            ag.suspicion = 0.22;
+            ag.loseSightTimer = 0;
+          }
+        }
+      }
+
+      // Update floating "?" / "!" sprite above zombie head
+      if (ag.suspicionSprite) {
+        if (ag.alertBannerTimer > 0 && ag.alerted) {
+          ag.suspicionSprite.visible = true;
+          (ag.suspicionSprite.material as THREE.SpriteMaterial).map = zAlertBang;
+        } else if (!ag.alerted && ag.suspicion > 0.03 && distPlayer < 45) {
+          ag.suspicionSprite.visible = true;
+          const stepIdx = Math.min(
+            zQuestionSteps.length - 1,
+            Math.max(0, Math.round(ag.suspicion * (zQuestionSteps.length - 1)))
+          );
+          (ag.suspicionSprite.material as THREE.SpriteMaterial).map = zQuestionSteps[stepIdx];
+        } else {
+          ag.suspicionSprite.visible = false;
+        }
       }
 
       const evalRes = evaluateZombieState(ag.state, {
         alive: ag.alive,
         dying: ag.dying,
-        distToTarget: targetDist,
+        distToTarget: ag.alerted ? targetDist : ag.detectRadius + 10,
         detectRadius: ag.detectRadius,
         attackState: ag.attackState,
         isSprinter: ag.isSprinter && !ag.isCrawler,
@@ -701,7 +1045,7 @@ export function buildZombieSystem(
       if (evalRes.nextState === ZOMBIE_STATES.DEATH) {
         desiredClip = 'death';
       } else if (evalRes.nextState === ZOMBIE_STATES.ATTACK) {
-        desiredClip = targetCivId && rng() < 0.3 ? 'biting' : 'attack';
+        desiredClip = targetCivId && ((ag.voiceSeed & 3) === 0) ? 'biting' : 'attack';
       } else if (ag.isCrawler) {
         desiredClip = 'crawl';
       } else if (evalRes.nextState === ZOMBIE_STATES.RUN) {
@@ -718,7 +1062,7 @@ export function buildZombieSystem(
         desiredClip = ag.wanderTimer > 2.2 ? 'walk' : 'idle';
       }
 
-      // Spatial movement
+      // Spatial movement with organic cadence + lunge forward impulse
       let speedMps = 0;
       let moveYaw = ag.yaw;
       if (evalRes.nextState === ZOMBIE_STATES.RUN) {
@@ -732,6 +1076,9 @@ export function buildZombieSystem(
         moveYaw = ag.wanderAngle;
       } else if (evalRes.nextState === ZOMBIE_STATES.ATTACK) {
         moveYaw = Math.atan2(targetX - ag.x, targetZ - ag.z);
+        speedMps = ag.lungeBoost;
+      } else if (ag.suspicion > 0.15) {
+        moveYaw = Math.atan2(targetX - ag.x, targetZ - ag.z);
       }
 
       // Smooth turn
@@ -740,7 +1087,7 @@ export function buildZombieSystem(
       while (dyaw < -Math.PI) dyaw += Math.PI * 2;
       ag.yaw += dyaw * Math.min(1, safeDt * 6.5);
 
-      if (speedMps > 0.01 && targetDist > 1.2) {
+      if (speedMps > 0.01 && targetDist > 0.85) {
         const nx = ag.x + Math.sin(ag.yaw) * speedMps * safeDt;
         const nz = ag.z + Math.cos(ag.yaw) * speedMps * safeDt;
         if (!collisionWorld.resolveCircle(nx, nz, 0.45).hit) {
@@ -752,6 +1099,27 @@ export function buildZombieSystem(
         }
       }
 
+      // Lightweight horde separation so pressing zombies fan around target
+      if (distPlayer < 55) {
+        for (let j = i + 1; j < agentCount; j++) {
+          const other = agents[j];
+          if (other.dormant || !other.alive) continue;
+          const sdx = ag.x - other.x;
+          const sdz = ag.z - other.z;
+          const sd2 = sdx * sdx + sdz * sdz;
+          if (sd2 < 0.78 * 0.78 && sd2 > 1e-5) {
+            const sd = Math.sqrt(sd2);
+            const push = (0.78 - sd) * 0.45;
+            const pxStep = (sdx / sd) * push;
+            const pzStep = (sdz / sd) * push;
+            ag.x += pxStep;
+            ag.z += pzStep;
+            other.x -= pxStep;
+            other.z -= pzStep;
+          }
+        }
+      }
+
       ag.root.position.set(ag.x, ag.y, ag.z);
       ag.root.rotation.y = ag.yaw;
 
@@ -759,9 +1127,13 @@ export function buildZombieSystem(
         switchClip(ag, desiredClip, evalRes.loop, evalRes.crossfade);
       }
 
-      // Tick mixer when within reasonable range of camera/player (saves CPU in dense worlds)
-      if (ag.mixer && (distPlayer < 120 || assetsReady)) {
-        ag.mixer.update(safeDt);
+      // Distance-tiered mixer update to preserve 60fps at full 314-agent city cap
+      if (ag.mixer) {
+        if (distPlayer < 65 || ag.alerted) {
+          ag.mixer.update(safeDt);
+        } else if (distPlayer < 120 && ((frameCounter + ag.id) & 1) === 0) {
+          ag.mixer.update(safeDt * 2);
+        }
       }
     }
   }
@@ -797,14 +1169,22 @@ export function buildZombieSystem(
     if (!ag || !ag.alive || ag.dormant) return false;
 
     ag.hp -= damage;
+    ag.suspicion = 1;
     ag.alerted = true;
+    ag.loseSightTimer = 0;
+    ag.alertBannerTimer = 1.6;
     const d = shooterPos ? Math.hypot(ag.x - shooterPos.x, ag.z - shooterPos.z) : 12;
+    const dirX = shooterPos ? (ag.x - shooterPos.x) / Math.max(0.1, d) : 0;
+    const dirZ = shooterPos ? (ag.z - shooterPos.z) / Math.max(0.1, d) : 0;
+    spawnBloodBurst(ag.x, ag.y + (ag.isCrawler ? 0.45 : 1.2), ag.z, 10, dirX, dirZ);
 
     if (ag.hp <= 0) {
       ag.hp = 0;
       ag.alive = false;
       ag.dying = true;
       ag.state = ZOMBIE_STATES.DEATH;
+      if (ag.suspicionSprite) ag.suspicionSprite.visible = false;
+      spawnDeathBloodPool(ag.x, ag.y, ag.z, ag.zone === 'outbreak' ? 1.15 : 1.0);
       switchClip(ag, 'death', false, 0.14);
       playZombieSound('down', d, 1.0);
     } else {
@@ -849,8 +1229,18 @@ export function buildZombieSystem(
     },
     dispose: () => {
       disposed = true;
+      unsubWorldBus();
       fallbackGeo.dispose();
       fallbackMat.dispose();
+      bloodBurstGeo.dispose();
+      bloodBurstMat.dispose();
+      bloodPoolGeo.dispose();
+      bloodPoolMat.dispose();
+      for (const ag of agents) {
+        if (ag.suspicionSprite) {
+          (ag.suspicionSprite.material as THREE.SpriteMaterial).dispose();
+        }
+      }
     },
   };
 }

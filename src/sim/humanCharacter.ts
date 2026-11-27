@@ -148,7 +148,7 @@ export const CLOTH_WIND_TIME_UNIFORM = { value: 0 };
 export function applyClothWindShader(
   mat: THREE.MeshStandardMaterial | THREE.MeshPhysicalMaterial,
   windStrengthUniform: { value: number },
-  cacheTag = 'cloth-wind-pbr-v3'
+  cacheTag = 'cloth-wind-pbr-v4'
 ): void {
   mat.customProgramCacheKey = () => cacheTag;
   mat.onBeforeCompile = (shader) => {
@@ -208,6 +208,21 @@ export function applyClothWindShader(
         }
       }`
     );
+
+    // PS2-soul velvety cloth rim & atmospheric shadow richness (shading does the work!)
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <dithering_fragment>',
+      `
+      {
+        vec3 cN = normalize(normal);
+        vec3 cV = normalize(vViewPosition);
+        float cNdotV = clamp(dot(cN, cV), 0.0, 1.0);
+        float clothRim = pow(1.0 - cNdotV, 2.8);
+        float luma = dot(gl_FragColor.rgb, vec3(0.299, 0.587, 0.114));
+        gl_FragColor.rgb += gl_FragColor.rgb * clothRim * 0.22 + vec3(0.018, 0.022, 0.032) * (1.0 - smoothstep(0.05, 0.45, luma));
+      }
+      #include <dithering_fragment>`
+    );
   };
 }
 
@@ -217,7 +232,7 @@ export function applyClothWindShader(
  */
 function applyHumanSkinShader(
   mat: THREE.MeshPhysicalMaterial,
-  cacheTag = 'human-skin-sss-v1'
+  cacheTag = 'human-skin-sss-v2'
 ): void {
   mat.customProgramCacheKey = () => cacheTag;
   mat.onBeforeCompile = (shader) => {
@@ -229,11 +244,11 @@ function applyHumanSkinShader(
         vec3 sssN = normalize(normal);
         vec3 sssV = normalize(vViewPosition);
         float ndotv = clamp(dot(sssN, sssV), 0.0, 1.0);
-        float rimWrap = pow(1.0 - ndotv, 2.4);
+        float rimWrap = pow(1.0 - ndotv, 2.3);
         float luma = dot(gl_FragColor.rgb, vec3(0.299, 0.587, 0.114));
-        float terminatorMask = smoothstep(0.02, 0.34, luma) * (1.0 - smoothstep(0.32, 0.78, luma));
-        vec3 warmBloodTint = vec3(0.16, 0.048, 0.028);
-        gl_FragColor.rgb += warmBloodTint * (terminatorMask * 0.34 + rimWrap * luma * 0.28);
+        float terminatorMask = smoothstep(0.02, 0.36, luma) * (1.0 - smoothstep(0.34, 0.80, luma));
+        vec3 warmBloodTint = vec3(0.18, 0.052, 0.030);
+        gl_FragColor.rgb += warmBloodTint * (terminatorMask * 0.38 + rimWrap * luma * 0.30);
       }
       #include <dithering_fragment>`
     );
@@ -2435,8 +2450,8 @@ export function getSharedHumanGeometries(): SharedHumanGeometries {
   eyebrowArch.rotateZ(Math.PI * 0.5);
   eyebrowArch.scale(1.0, 0.72, 0.65);
 
-  // Seamless overlapping draped geometries for 314 street pedestrians (zero exposed joints!)
-  const instHead = createSculptedHeadGeometry(0.35, 28, 22);
+  // Seamless overlapping draped geometries for 314 street pedestrians (zero exposed joints, lean poly count!)
+  const instHead = createSculptedHeadGeometry(0.35, 20, 16);
   const instTorso = createTorsoGeometry('athletic_male', true);
   const instPelvis = createPelvisGeometry('athletic_male');
   const instCoatSkirt = createCoatSkirtGeometry(0.46, 1.05);
@@ -2497,8 +2512,8 @@ export function getSharedHumanGeometries(): SharedHumanGeometries {
   const backpack = createSculptedBackpackGeometry();
 
   cachedGeos = {
-    headMale: createSculptedHeadGeometry(0.12, 96, 72),
-    headFemale: createSculptedHeadGeometry(0.85, 96, 72),
+    headMale: createSculptedHeadGeometry(0.12, 56, 42),
+    headFemale: createSculptedHeadGeometry(0.85, 56, 42),
     neck: createNeckGeometry(),
     ear: createSculptedEarGeometry(),
     eyeball,
@@ -2872,6 +2887,11 @@ export function createRiggedHuman(
   // =========================================================================
   const m = getBuildMetrics(build);
   const root = new THREE.Group();
+  root.userData.spawnIdentity = {
+    faceId: `face_${useWeatheredFace ? 'w' : 'c'}_${(variantIdx * 3) % SKIN_PALETTE.length}_${variantIdx % 7}`,
+    fabricId: `fab_${outfit}_${(variantIdx * 7 + 1) % CIVILIAN_JACKET_COLORS.length}`,
+    voiceSeed: ((variantIdx + 1) * 2654435761) >>> 0,
+  };
   const standingPelvisY = m.standingPelvisY;
   const seatedPelvisY = 0.54;
 
@@ -4197,9 +4217,9 @@ export function applyHumanPose(rig: HumanRig, params: HumanPoseParams): void {
       }
     }
   } else {
-    // Smooth, grounded biomechanical walking gait (natural hip sway/drop, soft knee drive, relaxed arms!)
+    // Smooth, grounded biomechanical walking gait (natural hip sway/drop, soft knee drive, relaxed arms + wrist lag!)
     const w = params.walkCycle ?? elapsed * 6.8 + phase;
-    const sinW = Math.sin(w);
+    const sinW = Math.tanh(Math.sin(w) * 1.18);
     const cosW = Math.cos(w);
     const doubleBounce = Math.abs(cosW) * 0.028;
 
@@ -4228,8 +4248,10 @@ export function applyHumanPose(rig: HumanRig, params: HumanPoseParams): void {
 
     rig.leftShoulder.rotation.set(sinW * 0.40 - 0.05, 0.04, 0.048);
     rig.leftElbow.rotation.set(-0.22 - Math.max(0, -sinW) * 0.34, 0, -0.04);
+    rig.leftHandGrp.rotation.set(-cosW * 0.10, 0, 0);
     rig.rightShoulder.rotation.set(-sinW * 0.40 - 0.05, -0.04, -0.048);
     rig.rightElbow.rotation.set(-0.22 - Math.max(0, sinW) * 0.34, 0, 0.04);
+    rig.rightHandGrp.rotation.set(cosW * 0.10, 0, 0);
   }
 
   // Spec 1: Polite aisle/queue sidestep (±0.65 rad) + head-nod overlay

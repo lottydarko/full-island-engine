@@ -48,6 +48,9 @@ export type PedPersonality = 'polite' | 'rude';
 
 export interface PedAgent {
   id: string;
+  faceId: string;
+  fabricId: string;
+  voiceSeed: number;
   role: PedRole;
   civClass: CivilianClass;
   personality: PedPersonality;
@@ -485,6 +488,8 @@ export function buildPedestrianSystem(
     let nextId = 0;
 
     const makeBaseAgent = (role: PedRole, civClass: CivilianClass): PedAgent => {
+      const idx = nextId++;
+      const id = `ped_${idx}`;
       const pal = CLASS_OUTFITS[civClass];
       const [hMin, hMax] = pal.heightRange;
       const isLongCoatClass =
@@ -494,8 +499,27 @@ export function buildPedestrianSystem(
         civClass === 'transit_guard' ||
         civClass === 'gang_member';
       const isRude = civClass !== 'transit_guard' && civClass !== 'gang_member' && rng() < 0.15;
+
+      // Permanent spawn identity — rolled once at spawn and retained for life
+      let hash = (seed ^ Math.imul(idx + 1, 2654435761)) >>> 0;
+      hash = Math.imul(hash ^ (hash >>> 15), 2246822519) >>> 0;
+      const voiceSeed = (hash ^ Math.imul(idx + 17, 3266489917)) >>> 0;
+      const skinIdx = Math.floor(rng() * SKIN_TONES.length);
+      const hairIdx = Math.floor(rng() * HAIR_TONES.length);
+      const jacketIdx = Math.floor(rng() * pal.jacket.length);
+      const pantsIdx = Math.floor(rng() * pal.pants.length);
+      const bootsIdx = Math.floor(rng() * pal.boots.length);
+      const scarfIdx = Math.floor(rng() * SCARF_TONES.length);
+      const hatIdx = Math.floor(rng() * pal.hat.length);
+      const propIdx = Math.floor(rng() * pal.prop.length);
+      const faceId = `f:${skinIdx}:${hairIdx}:${(voiceSeed >>> 0) & 255}`;
+      const fabricId = `c:${jacketIdx}:${pantsIdx}:${bootsIdx}:${scarfIdx}:${hatIdx}:${propIdx}`;
+
       return {
-        id: `ped_${nextId++}`,
+        id,
+        faceId,
+        fabricId,
+        voiceSeed,
         role,
         civClass,
         personality: isRude ? 'rude' : 'polite',
@@ -911,8 +935,18 @@ export function buildPedestrianSystem(
     for (let i = 0; i < totalCount; i++) {
       const ag = agents[i];
       const pal = CLASS_OUTFITS[ag.civClass];
+      const fParts = ag.faceId.split(':');
+      const cParts = ag.fabricId.split(':');
+      const skinIdx = (Number(fParts[1]) || 0) % SKIN_TONES.length;
+      const hairIdx = (Number(fParts[2]) || 0) % HAIR_TONES.length;
+      const jacketIdx = (Number(cParts[1]) || 0) % pal.jacket.length;
+      const pantsIdx = (Number(cParts[2]) || 0) % pal.pants.length;
+      const bootsIdx = (Number(cParts[3]) || 0) % pal.boots.length;
+      const scarfIdx = (Number(cParts[4]) || 0) % SCARF_TONES.length;
+      const hatIdx = (Number(cParts[5]) || 0) % pal.hat.length;
+      const propIdx = (Number(cParts[6]) || 0) % pal.prop.length;
 
-      tmpCol.set(pick(pal.jacket));
+      tmpCol.set(pal.jacket[jacketIdx]);
       torsoInst.setColorAt(i, tmpCol);
       coatSkirtInst.setColorAt(i, tmpCol);
       leftUpperArmInst.setColorAt(i, tmpCol);
@@ -920,32 +954,32 @@ export function buildPedestrianSystem(
       leftForearmInst.setColorAt(i, tmpCol);
       rightForearmInst.setColorAt(i, tmpCol);
 
-      tmpCol.set(pick(pal.pants));
+      tmpCol.set(pal.pants[pantsIdx]);
       hipsInst.setColorAt(i, tmpCol);
       leftThighInst.setColorAt(i, tmpCol);
       rightThighInst.setColorAt(i, tmpCol);
       leftShinInst.setColorAt(i, tmpCol);
       rightShinInst.setColorAt(i, tmpCol);
 
-      tmpCol.set(pick(SCARF_TONES));
+      tmpCol.set(SCARF_TONES[scarfIdx]);
       scarfInst.setColorAt(i, tmpCol);
 
-      tmpCol.set(pick(pal.boots));
+      tmpCol.set(pal.boots[bootsIdx]);
       leftBootInst.setColorAt(i, tmpCol);
       rightBootInst.setColorAt(i, tmpCol);
 
-      tmpCol.set(pick(SKIN_TONES));
+      tmpCol.set(SKIN_TONES[skinIdx]);
       headInst.setColorAt(i, tmpCol);
       leftHandInst.setColorAt(i, tmpCol);
       rightHandInst.setColorAt(i, tmpCol);
 
-      tmpCol.set(pick(HAIR_TONES));
+      tmpCol.set(HAIR_TONES[hairIdx]);
       flowHairInst.setColorAt(i, tmpCol);
 
-      tmpCol.set(pick(pal.hat));
+      tmpCol.set(pal.hat[hatIdx]);
       hatInst.setColorAt(i, tmpCol);
 
-      tmpCol.set(pick(pal.prop));
+      tmpCol.set(pal.prop[propIdx]);
       propInst.setColorAt(i, tmpCol);
       briefcaseInst.setColorAt(i, tmpCol);
     }
@@ -1207,6 +1241,8 @@ export function buildPedestrianSystem(
   const _shotMuzzle = new THREE.Vector3();
   const _shotDir = new THREE.Vector3();
   const _playerHitBox = new THREE.Box3();
+  const _playerBoxMin = new THREE.Vector3();
+  const _playerBoxMax = new THREE.Vector3();
   const _playerPosVec = new THREE.Vector3();
 
   const alertCrew = (crewIdx: number, px: number, pz: number, propagate: boolean) => {
@@ -1325,10 +1361,9 @@ export function buildPedestrianSystem(
     const playerPos = playerCtx?.pos;
     if (playerPos) {
       _playerPosVec.copy(playerPos);
-      _playerHitBox.set(
-        new THREE.Vector3(playerPos.x - 0.55, playerPos.y, playerPos.z - 0.55),
-        new THREE.Vector3(playerPos.x + 0.55, playerPos.y + 1.75, playerPos.z + 0.55)
-      );
+      _playerBoxMin.set(playerPos.x - 0.55, playerPos.y, playerPos.z - 0.55);
+      _playerBoxMax.set(playerPos.x + 0.55, playerPos.y + 1.75, playerPos.z + 0.55);
+      _playerHitBox.set(_playerBoxMin, _playerBoxMax);
     }
 
     // Drain world event bus -> civilians flee gunfire & scatter from chases (gang members never flee!)
@@ -1960,7 +1995,7 @@ export function buildPedestrianSystem(
       const rightX = -cosH;
       const rightZ = sinH;
 
-      const stride = isWalking ? Math.sin(ag.stridePhase) : 0;
+      const stride = isWalking ? Math.tanh(Math.sin(ag.stridePhase) * 1.18) : 0;
       const cosStride = isWalking ? Math.cos(ag.stridePhase) : 0;
       const idleShift = isWalking
         ? 0
