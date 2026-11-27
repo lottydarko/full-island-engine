@@ -5,6 +5,7 @@ import {
   getTerrainHeight,
   isNearAnyRoad,
   mulberry32,
+  POSTER_PILLARS,
   ROADS,
   SIGNALIZED_INTERSECTIONS,
   signedLandDistance,
@@ -58,7 +59,7 @@ export const POSTER_AD_FILES: string[] = [
   'mov01_kamen_poster.webp',
 ];
 
-const POSTER_2_3_SET = new Set<string>([
+export const POSTER_2_3_SET = new Set<string>([
   'bb28p_shyopot_shhh_train_poste.webp',
   'mov01_kamen_poster.webp',
 ]);
@@ -73,12 +74,150 @@ const adTextureLoader = new THREE.TextureLoader();
 const adTextureCache = new Map<string, THREE.Texture>();
 const adMaterialCache = new Map<string, THREE.MeshStandardMaterial>();
 const trackedAdMaterials: TrackedSignMat[] = [];
+const trackedAdMatSet = new Set<THREE.MeshStandardMaterial>();
+let currentAdNightFactor = 0;
+
+export function registerTrackedAdMaterial(
+  mat: THREE.MeshStandardMaterial,
+  dayIntensity: number,
+  nightIntensity: number
+): THREE.MeshStandardMaterial {
+  if (!trackedAdMatSet.has(mat)) {
+    trackedAdMatSet.add(mat);
+    trackedAdMaterials.push({ mat, dayIntensity, nightIntensity });
+  }
+  mat.emissiveIntensity = THREE.MathUtils.lerp(
+    dayIntensity,
+    nightIntensity,
+    currentAdNightFactor
+  );
+  return mat;
+}
+
+// Procedural Kaluga 2059 poster fallback used ONLY if a local ad asset URL fails to load
+// (e.g., standalone signage-lab preview without public/assets/ads/). Never runs when real .webp art loads.
+function paintProceduralAdFallback(url: string, crop23To12: boolean): HTMLCanvasElement {
+  const isPoster = url.includes('/posters/');
+  const isStrip = url.includes('/strips/');
+  const w = isPoster ? (crop23To12 ? 512 : 384) : isStrip ? 512 : 512;
+  const h = isPoster ? 768 : isStrip ? 128 : 256;
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext('2d')!;
+
+  let hash = 2166136261;
+  for (let i = 0; i < url.length; i++) {
+    hash ^= url.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+
+  const palettes: { bg1: string; bg2: string; accent: string; ink: string; tag: string; title: string; sub: string }[] = [
+    { bg1: '#0b1420', bg2: '#1a2f46', accent: '#38bdf8', ink: '#f1f5f9', tag: 'КАЛУГА · 2059', title: 'НЕБО ТРАНЗИТ', sub: 'ОРБИТАЛЬНЫЙ РЕЙС' },
+    { bg1: '#1d0d12', bg2: '#3f1520', accent: '#f43f5e', ink: '#fff1f2', tag: 'ПРЕМЬЕРА · КИНО', title: 'ЧЁРНЫЙ КАМЕНЬ', sub: 'СМОТРИТЕ В СЕКТОРЕ 1' },
+    { bg1: '#17120a', bg2: '#362410', accent: '#f59e0b', ink: '#fef3c7', tag: 'ЭФИР 104.8 FM', title: 'РАДИО КАЛУГА', sub: 'НОЧНАЯ ВОЛНА · 24/7' },
+    { bg1: '#0d1917', bg2: '#153630', accent: '#2dd4bf', ink: '#f0fdfa', tag: 'МОДА · СИЛУЭТ', title: 'АТЕЛЬЕ СИЛУЭТ', sub: 'ЗИМНЯЯ КОЛЛЕКЦИЯ' },
+    { bg1: '#120f24', bg2: '#271c4a', accent: '#a78bfa', ink: '#f5f3ff', tag: 'СВЯЗЬ · ШЁПОТ', title: 'ШЁПОТ-СЕТЬ', sub: 'ТИШЕ. БЛИЖЕ. ВЕЗДЕ.' },
+    { bg1: '#1c1410', bg2: '#3b2418', accent: '#fb923c', ink: '#ffedd5', tag: 'ПОРТ · ГАВАНЬ', title: 'СТАРЫЙ ПОРТ', sub: 'КРЕПКИЙ КОФЕ И ДЫМ' },
+    { bg1: '#0c1622', bg2: '#17304d', accent: '#60a5fa', ink: '#eff6ff', tag: 'ВЕКТОР · НЕЙРО', title: 'ВЕКТОР-70', sub: 'ЧИП НОВОГО ПОКОЛЕНИЯ' },
+    { bg1: '#1a170c', bg2: '#383014', accent: '#eab308', ink: '#fefce8', tag: 'ВОЛГА · АВТО', title: 'ВОЛГА-ТУРБО', sub: 'ПОЛНЫЙ ПРИВОД НА ЛЬДУ' },
+    { bg1: '#141118', bg2: '#2e1e36', accent: '#e879f9', ink: '#fdf4ff', tag: 'ЭКРАН · ЭФИР', title: 'ЭФИР · СЕЗОН II', sub: 'КАЖДУЮ ПЯТНИЦУ В 22:00' },
+  ];
+  const pal = palettes[hash % palettes.length];
+  const fileStem = (url.split('/').pop() || 'POSTER')
+    .replace(/\.webp$/i, '')
+    .replace(/_/g, ' ')
+    .toUpperCase()
+    .slice(0, 22);
+
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, pal.bg1);
+  grad.addColorStop(1, pal.bg2);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
+
+  // Subtle architectural grid & constructivist geometric emblem
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.lineWidth = 1.5;
+  for (let y = 32; y < h; y += 36) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+
+  // Constructivist diagonal stripe & geometric focal disc
+  ctx.fillStyle = pal.accent;
+  ctx.globalAlpha = 0.16;
+  ctx.beginPath();
+  ctx.moveTo(0, h * 0.62);
+  ctx.lineTo(w, h * 0.42);
+  ctx.lineTo(w, h * 0.56);
+  ctx.lineTo(0, h * 0.76);
+  ctx.closePath();
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  const cx = w * 0.5;
+  const cy = isPoster ? h * 0.42 : h * 0.5;
+  const rad = Math.min(w, h) * (isPoster ? 0.28 : 0.3);
+  ctx.strokeStyle = pal.accent;
+  ctx.lineWidth = isPoster ? 6 : 4;
+  ctx.beginPath();
+  ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.fillStyle = pal.accent;
+  ctx.globalAlpha = 0.25;
+  ctx.beginPath();
+  ctx.arc(cx, cy, rad * 0.72, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Frame border (inset slightly when 2:3 cropped to 1:2 so crop stays clean)
+  const padX = crop23To12 ? Math.round(w * 0.145) : 16;
+  const padY = 16;
+  ctx.strokeStyle = pal.accent;
+  ctx.lineWidth = 5;
+  ctx.strokeRect(padX, padY, w - padX * 2, h - padY * 2);
+
+  // Header badge
+  ctx.fillStyle = pal.accent;
+  ctx.fillRect(padX + 14, padY + 18, w - (padX + 14) * 2, isPoster ? 38 : 28);
+  ctx.fillStyle = '#070b12';
+  ctx.font = `bold ${isPoster ? 20 : 16}px monospace`;
+  ctx.textAlign = 'center';
+  ctx.fillText(pal.tag, cx, padY + (isPoster ? 44 : 38));
+
+  // Main headline & subtitle
+  ctx.fillStyle = pal.ink;
+  ctx.font = `bold ${isPoster ? 34 : 30}px sans-serif`;
+  ctx.fillText(pal.title, cx, isPoster ? h * 0.74 : h * 0.56, w - padX * 2 - 24);
+
+  ctx.fillStyle = pal.accent;
+  ctx.font = `bold ${isPoster ? 18 : 16}px monospace`;
+  ctx.fillText(pal.sub, cx, isPoster ? h * 0.81 : h * 0.74, w - padX * 2 - 24);
+
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.font = `600 ${isPoster ? 13 : 12}px monospace`;
+  ctx.fillText(fileStem, cx, h - padY - 18, w - padX * 2 - 20);
+
+  return c;
+}
 
 function loadAdTexture(url: string, crop23To12 = false): THREE.Texture {
   const cacheKey = crop23To12 ? `${url}#crop12` : url;
   const existing = adTextureCache.get(cacheKey);
   if (existing) return existing;
-  const tex = adTextureLoader.load(url);
+  const tex = adTextureLoader.load(
+    url,
+    undefined,
+    undefined,
+    () => {
+      (tex as THREE.Texture<TexImageSource>).image = paintProceduralAdFallback(url, crop23To12);
+      tex.needsUpdate = true;
+    }
+  );
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;
   if (crop23To12) {
@@ -91,7 +230,7 @@ function loadAdTexture(url: string, crop23To12 = false): THREE.Texture {
   return tex;
 }
 
-function getOrCreateAdSignMaterial(
+export function getOrCreateAdSignMaterial(
   url: string,
   dayIntensity: number,
   nightIntensity: number,
@@ -105,17 +244,22 @@ function getOrCreateAdSignMaterial(
     map: tex,
     emissive: new THREE.Color('#ffffff'),
     emissiveMap: tex,
-    emissiveIntensity: dayIntensity,
+    emissiveIntensity: THREE.MathUtils.lerp(
+      dayIntensity,
+      nightIntensity,
+      currentAdNightFactor
+    ),
     roughness: 0.6,
     metalness: 0.0,
   });
   adMaterialCache.set(key, mat);
-  trackedAdMaterials.push({ mat, dayIntensity, nightIntensity });
+  registerTrackedAdMaterial(mat, dayIntensity, nightIntensity);
   return mat;
 }
 
 export function setAdSignsNightFactor(nightFactor: number): void {
   const t = THREE.MathUtils.clamp(nightFactor, 0, 1);
+  currentAdNightFactor = t;
   for (let i = 0; i < trackedAdMaterials.length; i++) {
     const entry = trackedAdMaterials[i];
     entry.mat.emissiveIntensity = THREE.MathUtils.lerp(
@@ -1439,16 +1583,33 @@ export interface BusShelterStopInfo {
   name: string;
 }
 
-export function buildBusShelterMesh(
-  stop: BusShelterStopInfo,
-  adIndex = 0,
-  includeBayLine = true
-): {
-  group: THREE.Group;
-  roofLightMat: THREE.MeshStandardMaterial;
-  stopSignMat: THREE.MeshStandardMaterial;
-  adSignMat: THREE.MeshStandardMaterial;
-} {
+interface SharedShelterAndPillarAssets {
+  shelterSteelMat: THREE.MeshStandardMaterial;
+  shelterGlassMat: THREE.MeshStandardMaterial;
+  shelterLightMat: THREE.MeshStandardMaterial;
+  busBayPaintMat: THREE.MeshStandardMaterial;
+  roofGeo: THREE.BoxGeometry;
+  roofLightGeo: THREE.BoxGeometry;
+  backGeo: THREE.BoxGeometry;
+  postGeo: THREE.BoxGeometry;
+  benchGeo: THREE.BoxGeometry;
+  signBoardGeo: THREE.BoxGeometry;
+  cabinetPlinthGeo: THREE.BoxGeometry;
+  cabinetBoxGeo: THREE.BoxGeometry;
+  cabinetHeaderLightGeo: THREE.BoxGeometry;
+  posterGeo: THREE.PlaneGeometry;
+  bayLineGeo: THREE.PlaneGeometry;
+  pillarBasePlinthGeo: THREE.BoxGeometry;
+  pillarPedestalGeo: THREE.BoxGeometry;
+  pillarCabinetGeo: THREE.BoxGeometry;
+  pillarCrownGeo: THREE.BoxGeometry;
+  pillarHeaderLightGeo: THREE.BoxGeometry;
+}
+
+let sharedShelterAssets: SharedShelterAndPillarAssets | null = null;
+
+function getSharedShelterAssets(): SharedShelterAndPillarAssets {
+  if (sharedShelterAssets) return sharedShelterAssets;
   const shelterSteelMat = new THREE.MeshStandardMaterial({
     color: '#222c36',
     roughness: 0.45,
@@ -1460,11 +1621,15 @@ export function buildBusShelterMesh(
     opacity: 0.36,
     roughness: 0.14,
   });
-  const shelterLightMat = new THREE.MeshStandardMaterial({
-    color: '#e0f4ff',
-    emissive: new THREE.Color('#7dd3fc'),
-    emissiveIntensity: 1.35,
-  });
+  const shelterLightMat = registerTrackedAdMaterial(
+    new THREE.MeshStandardMaterial({
+      color: '#e0f4ff',
+      emissive: new THREE.Color('#7dd3fc'),
+      emissiveIntensity: 0.22,
+    }),
+    0.22,
+    1.35
+  );
   const busBayPaintMat = new THREE.MeshStandardMaterial({
     color: '#d4a11c',
     roughness: 0.65,
@@ -1472,76 +1637,152 @@ export function buildBusShelterMesh(
     polygonOffsetFactor: -2,
   });
 
+  sharedShelterAssets = {
+    shelterSteelMat,
+    shelterGlassMat,
+    shelterLightMat,
+    busBayPaintMat,
+    roofGeo: new THREE.BoxGeometry(5.6, 0.18, 2.2),
+    roofLightGeo: new THREE.BoxGeometry(4.4, 0.06, 0.25),
+    backGeo: new THREE.BoxGeometry(5.3, 2.35, 0.08),
+    postGeo: new THREE.BoxGeometry(0.12, 2.7, 0.12),
+    benchGeo: new THREE.BoxGeometry(3.8, 0.12, 0.56),
+    signBoardGeo: new THREE.BoxGeometry(3.6, 0.9, 0.14),
+    cabinetPlinthGeo: new THREE.BoxGeometry(0.24, 0.16, 1.24),
+    cabinetBoxGeo: new THREE.BoxGeometry(0.18, 2.38, 1.2),
+    cabinetHeaderLightGeo: new THREE.BoxGeometry(0.195, 0.05, 1.06),
+    posterGeo: new THREE.PlaneGeometry(1.04, 2.08),
+    bayLineGeo: new THREE.PlaneGeometry(11.5, 0.22),
+    // Pedestrian Poster Pillar (3.20 m tall steel totem carrying 1.20 x 2.38 m Citylight cabinet)
+    pillarBasePlinthGeo: new THREE.BoxGeometry(1.42, 0.14, 0.44),
+    pillarPedestalGeo: new THREE.BoxGeometry(0.52, 0.46, 0.26),
+    pillarCabinetGeo: new THREE.BoxGeometry(1.2, 2.38, 0.2),
+    pillarCrownGeo: new THREE.BoxGeometry(1.34, 0.22, 0.28),
+    pillarHeaderLightGeo: new THREE.BoxGeometry(1.06, 0.05, 0.215),
+  };
+  return sharedShelterAssets;
+}
+
+export function buildBusShelterMesh(
+  stop: BusShelterStopInfo,
+  adIndex = 0,
+  includeBayLine = true
+): {
+  group: THREE.Group;
+  roofLightMat: THREE.MeshStandardMaterial;
+  stopSignMat: THREE.MeshStandardMaterial;
+  adSignMat: THREE.MeshStandardMaterial;
+  leftAdSignMat: THREE.MeshStandardMaterial;
+} {
+  const assets = getSharedShelterAssets();
+  const { shelterSteelMat, shelterGlassMat, shelterLightMat, busBayPaintMat } = assets;
+
   const sg = new THREE.Group();
 
-  const roof = new THREE.Mesh(new THREE.BoxGeometry(5.6, 0.18, 2.2), shelterSteelMat);
+  const roof = new THREE.Mesh(assets.roofGeo, shelterSteelMat);
   roof.position.set(0, 2.7, 0);
   sg.add(roof);
-  const roofLight = new THREE.Mesh(new THREE.BoxGeometry(4.4, 0.06, 0.25), shelterLightMat);
+  const roofLight = new THREE.Mesh(assets.roofLightGeo, shelterLightMat);
   roofLight.position.set(0, 2.59, 0.2);
   sg.add(roofLight);
 
-  const back = new THREE.Mesh(new THREE.BoxGeometry(5.3, 2.35, 0.08), shelterGlassMat);
+  const back = new THREE.Mesh(assets.backGeo, shelterGlassMat);
   back.position.set(0, 1.35, -0.96);
   sg.add(back);
   for (const px of [-2.6, 0, 2.6]) {
-    const post = new THREE.Mesh(new THREE.BoxGeometry(0.12, 2.7, 0.12), shelterSteelMat);
+    const post = new THREE.Mesh(assets.postGeo, shelterSteelMat);
     post.position.set(px, 1.35, -0.92);
     sg.add(post);
   }
-  const bench = new THREE.Mesh(new THREE.BoxGeometry(3.8, 0.12, 0.56), shelterSteelMat);
+  const bench = new THREE.Mesh(assets.benchGeo, shelterSteelMat);
   bench.position.set(0, 0.52, -0.54);
   sg.add(bench);
 
-  // Bilingual glowing bus stop signboard mounted above shelter roof!
+  // Bilingual glowing bus stop signboard mounted above shelter roof (3.6 x 0.9 m class)
   const stopTex = createBusStopSignTex(stop.cyrillic, stop.routes, stop.name);
-  const stopSignMat = new THREE.MeshStandardMaterial({
-    map: stopTex,
-    emissiveMap: stopTex,
-    emissive: new THREE.Color('#ffffff'),
-    emissiveIntensity: 0.75,
-    roughness: 0.28,
-  });
-  const signBoard = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.9, 0.14), stopSignMat);
+  const stopSignMat = registerTrackedAdMaterial(
+    new THREE.MeshStandardMaterial({
+      map: stopTex,
+      emissiveMap: stopTex,
+      emissive: new THREE.Color('#ffffff'),
+      emissiveIntensity: 0.28,
+      roughness: 0.28,
+    }),
+    0.28,
+    0.95
+  );
+  const signBoard = new THREE.Mesh(assets.signBoardGeo, stopSignMat);
   signBoard.position.set(0, 3.25, 0.85);
   sg.add(signBoard);
 
-  // Illuminated Citylight vertical poster cabinet integrated into the right wing of the shelter
-  const posterFile =
-    POSTER_AD_FILES[((adIndex % POSTER_AD_FILES.length) + POSTER_AD_FILES.length) % POSTER_AD_FILES.length];
+  // Right-wing illuminated Citylight vertical poster cabinet (1.20 x 2.38 m class)
+  const posterLen = POSTER_AD_FILES.length;
+  const rightPosterFile =
+    POSTER_AD_FILES[((adIndex % posterLen) + posterLen) % posterLen];
   const adSignMat = getOrCreateAdSignMaterial(
-    `/assets/ads/posters/${posterFile}`,
+    `/assets/ads/posters/${rightPosterFile}`,
     0.24,
     1.05,
-    POSTER_2_3_SET.has(posterFile)
+    POSTER_2_3_SET.has(rightPosterFile)
   );
 
-  const cabinetPlinth = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.16, 1.24), shelterSteelMat);
+  const cabinetPlinth = new THREE.Mesh(assets.cabinetPlinthGeo, shelterSteelMat);
   cabinetPlinth.position.set(2.72, 0.08, 0.05);
   sg.add(cabinetPlinth);
 
-  const cabinetBox = new THREE.Mesh(new THREE.BoxGeometry(0.18, 2.38, 1.20), shelterSteelMat);
+  const cabinetBox = new THREE.Mesh(assets.cabinetBoxGeo, shelterSteelMat);
   cabinetBox.position.set(2.72, 1.35, 0.05);
   sg.add(cabinetBox);
 
-  const cabinetHeaderLight = new THREE.Mesh(new THREE.BoxGeometry(0.195, 0.05, 1.06), shelterLightMat);
+  const cabinetHeaderLight = new THREE.Mesh(assets.cabinetHeaderLightGeo, shelterLightMat);
   cabinetHeaderLight.position.set(2.72, 2.48, 0.05);
   sg.add(cabinetHeaderLight);
 
-  const posterGeo = new THREE.PlaneGeometry(1.04, 2.08);
-  const outerPoster = new THREE.Mesh(posterGeo, adSignMat);
+  const outerPoster = new THREE.Mesh(assets.posterGeo, adSignMat);
   outerPoster.position.set(2.814, 1.34, 0.05);
   outerPoster.rotation.y = Math.PI * 0.5;
   sg.add(outerPoster);
 
-  const innerPoster = new THREE.Mesh(posterGeo, adSignMat);
+  const innerPoster = new THREE.Mesh(assets.posterGeo, adSignMat);
   innerPoster.position.set(2.626, 1.34, 0.05);
   innerPoster.rotation.y = -Math.PI * 0.5;
   sg.add(innerPoster);
 
+  // Left-wing mirrored illuminated Citylight vertical poster cabinet (1.20 x 2.38 m class, offset +7)
+  const leftPosterFile =
+    POSTER_AD_FILES[(((adIndex + 7) % posterLen) + posterLen) % posterLen];
+  const leftAdSignMat = getOrCreateAdSignMaterial(
+    `/assets/ads/posters/${leftPosterFile}`,
+    0.24,
+    1.05,
+    POSTER_2_3_SET.has(leftPosterFile)
+  );
+
+  const leftCabinetPlinth = new THREE.Mesh(assets.cabinetPlinthGeo, shelterSteelMat);
+  leftCabinetPlinth.position.set(-2.72, 0.08, 0.05);
+  sg.add(leftCabinetPlinth);
+
+  const leftCabinetBox = new THREE.Mesh(assets.cabinetBoxGeo, shelterSteelMat);
+  leftCabinetBox.position.set(-2.72, 1.35, 0.05);
+  sg.add(leftCabinetBox);
+
+  const leftCabinetHeaderLight = new THREE.Mesh(assets.cabinetHeaderLightGeo, shelterLightMat);
+  leftCabinetHeaderLight.position.set(-2.72, 2.48, 0.05);
+  sg.add(leftCabinetHeaderLight);
+
+  const leftOuterPoster = new THREE.Mesh(assets.posterGeo, leftAdSignMat);
+  leftOuterPoster.position.set(-2.814, 1.34, 0.05);
+  leftOuterPoster.rotation.y = -Math.PI * 0.5;
+  sg.add(leftOuterPoster);
+
+  const leftInnerPoster = new THREE.Mesh(assets.posterGeo, leftAdSignMat);
+  leftInnerPoster.position.set(-2.626, 1.34, 0.05);
+  leftInnerPoster.rotation.y = Math.PI * 0.5;
+  sg.add(leftInnerPoster);
+
   if (includeBayLine) {
     // Curbside bus bay painted yellow border line
-    const bayLine = new THREE.Mesh(new THREE.PlaneGeometry(11.5, 0.22), busBayPaintMat);
+    const bayLine = new THREE.Mesh(assets.bayLineGeo, busBayPaintMat);
     bayLine.rotation.x = -Math.PI * 0.5;
     bayLine.position.set(0, 0.115, 2.25);
     sg.add(bayLine);
@@ -1552,6 +1793,76 @@ export function buildBusShelterMesh(
     roofLightMat: shelterLightMat,
     stopSignMat,
     adSignMat,
+    leftAdSignMat,
+  };
+}
+
+// Pedestrian Poster Pillar (Totem): ~3.20 m tall steel column carrying two back-to-back
+// illuminated Citylight poster faces (1.20 x 2.38 m cabinet class, 1.04 x 2.08 m aperture).
+export function buildPosterPillarMesh(adIndex = 0): {
+  group: THREE.Group;
+  headerLightMat: THREE.MeshStandardMaterial;
+  frontAdMat: THREE.MeshStandardMaterial;
+  backAdMat: THREE.MeshStandardMaterial;
+} {
+  const assets = getSharedShelterAssets();
+  const { shelterSteelMat, shelterLightMat } = assets;
+
+  const posterLen = POSTER_AD_FILES.length;
+  const frontFile = POSTER_AD_FILES[((adIndex % posterLen) + posterLen) % posterLen];
+  const backFile =
+    POSTER_AD_FILES[(((adIndex + 7) % posterLen) + posterLen) % posterLen];
+
+  const frontAdMat = getOrCreateAdSignMaterial(
+    `/assets/ads/posters/${frontFile}`,
+    0.24,
+    1.05,
+    POSTER_2_3_SET.has(frontFile)
+  );
+  const backAdMat = getOrCreateAdSignMaterial(
+    `/assets/ads/posters/${backFile}`,
+    0.24,
+    1.05,
+    POSTER_2_3_SET.has(backFile)
+  );
+
+  const g = new THREE.Group();
+
+  // Grounded bottom-center at y = 0.0; total height = 3.20 m
+  const basePlinth = new THREE.Mesh(assets.pillarBasePlinthGeo, shelterSteelMat);
+  basePlinth.position.set(0, 0.07, 0);
+  g.add(basePlinth);
+
+  const pedestal = new THREE.Mesh(assets.pillarPedestalGeo, shelterSteelMat);
+  pedestal.position.set(0, 0.37, 0);
+  g.add(pedestal);
+
+  const cabinet = new THREE.Mesh(assets.pillarCabinetGeo, shelterSteelMat);
+  cabinet.position.set(0, 1.79, 0);
+  g.add(cabinet);
+
+  const crown = new THREE.Mesh(assets.pillarCrownGeo, shelterSteelMat);
+  crown.position.set(0, 3.09, 0);
+  g.add(crown);
+
+  const headerLight = new THREE.Mesh(assets.pillarHeaderLightGeo, shelterLightMat);
+  headerLight.position.set(0, 2.93, 0);
+  g.add(headerLight);
+
+  const frontPoster = new THREE.Mesh(assets.posterGeo, frontAdMat);
+  frontPoster.position.set(0, 1.78, 0.104);
+  g.add(frontPoster);
+
+  const backPoster = new THREE.Mesh(assets.posterGeo, backAdMat);
+  backPoster.position.set(0, 1.78, -0.104);
+  backPoster.rotation.y = Math.PI;
+  g.add(backPoster);
+
+  return {
+    group: g,
+    headerLightMat: shelterLightMat,
+    frontAdMat,
+    backAdMat,
   };
 }
 
@@ -1684,6 +1995,19 @@ export function buildTrafficSystem(
     shelter.group.rotation.y = bs.rotY;
     root.add(shelter.group);
     collisionWorld.addBox(bs.x, bs.z, 5.2, 1.9, bs.rotY);
+  }
+
+  // =========================================================================
+  // 1B. PEDESTRIAN POSTER PILLARS (TOTEMS) AT PLAZA & METRO-TRANSFER STOPS
+  // =========================================================================
+  for (let i = 0; i < POSTER_PILLARS.length; i++) {
+    const pp = POSTER_PILLARS[i];
+    const pillar = buildPosterPillarMesh(i * 3 + 2);
+    const groundY = getTerrainHeight(pp.x, pp.z);
+    pillar.group.position.set(pp.x, groundY, pp.z);
+    pillar.group.rotation.y = pp.rotY;
+    root.add(pillar.group);
+    collisionWorld.addBox(pp.x, pp.z, 1.45, 0.55, pp.rotY);
   }
 
   // =========================================================================

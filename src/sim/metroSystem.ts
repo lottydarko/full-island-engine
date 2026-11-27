@@ -26,6 +26,13 @@ import {
   buildStationComplex,
   StationNPCEntry,
 } from './interiors/stationComplexBuilder';
+import {
+  getOrCreateAdSignMaterial,
+  POSTER_2_3_SET,
+  POSTER_AD_FILES,
+  registerTrackedAdMaterial,
+  setAdSignsNightFactor,
+} from './trafficSystem';
 
 export interface OperatedTrainState {
   active: boolean;
@@ -131,6 +138,124 @@ function createStationSignTexture(cyrillic: string): THREE.CanvasTexture {
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
+}
+
+// =========================================================================
+// METRO PLATFORM CITYLIGHT POSTER WALL RUN (1.20 x 2.38 m vertical class)
+// Mounted flush against rear platform wall in 4 open bays clear of columns
+// (z = +-20, +-12, +-4), benches (+-12.5), booth (-2.0), stairs (+-2.0),
+// overhead signboard (+-4.3), doorways, and track edge.
+// =========================================================================
+export const METRO_PLATFORM_POSTER_ZS: readonly number[] = [
+  -18.0,
+  -15.8,
+  -8.6,
+  -6.2,
+  6.2,
+  8.6,
+  15.8,
+  18.0,
+];
+
+interface SharedMetroPosterWallAssets {
+  frameSteelMat: THREE.MeshStandardMaterial;
+  headerLightMat: THREE.MeshStandardMaterial;
+  plinthGeo: THREE.BoxGeometry;
+  cabinetGeo: THREE.BoxGeometry;
+  headerLightGeo: THREE.BoxGeometry;
+  posterGeo: THREE.PlaneGeometry;
+}
+
+let sharedMetroPosterWallAssets: SharedMetroPosterWallAssets | null = null;
+
+function getSharedMetroPosterWallAssets(): SharedMetroPosterWallAssets {
+  if (sharedMetroPosterWallAssets) return sharedMetroPosterWallAssets;
+  const frameSteelMat = new THREE.MeshStandardMaterial({
+    color: '#222c36',
+    roughness: 0.45,
+    metalness: 0.65,
+  });
+  const headerLightMat = registerTrackedAdMaterial(
+    new THREE.MeshStandardMaterial({
+      color: '#e0f4ff',
+      emissive: new THREE.Color('#7dd3fc'),
+      emissiveIntensity: 0.22,
+    }),
+    0.22,
+    1.35
+  );
+  sharedMetroPosterWallAssets = {
+    frameSteelMat,
+    headerLightMat,
+    plinthGeo: new THREE.BoxGeometry(0.24, 0.16, 1.24),
+    cabinetGeo: new THREE.BoxGeometry(0.18, 2.38, 1.2),
+    headerLightGeo: new THREE.BoxGeometry(0.195, 0.05, 1.06),
+    posterGeo: new THREE.PlaneGeometry(1.04, 2.08),
+  };
+  return sharedMetroPosterWallAssets;
+}
+
+export function buildMetroPosterWallRun(
+  stationIdx = 0,
+  sideSign = -1
+): THREE.Group {
+  const assets = getSharedMetroPosterWallAssets();
+  const wallGroup = new THREE.Group();
+  const count = METRO_PLATFORM_POSTER_ZS.length;
+  const posterLen = POSTER_AD_FILES.length;
+
+  // Platform deck top is at y = 0.36; rear wall inner face is at sideSign * 8.23
+  const wallX = sideSign * 8.14;
+  const faceX = wallX - sideSign * 0.094;
+  const faceRotY = sideSign < 0 ? Math.PI * 0.5 : -Math.PI * 0.5;
+  const baseFloorY = 0.36;
+
+  // Share geometry & batch structural framing per station into 3 InstancedMeshes
+  const plinthInst = new THREE.InstancedMesh(assets.plinthGeo, assets.frameSteelMat, count);
+  const cabinetInst = new THREE.InstancedMesh(assets.cabinetGeo, assets.frameSteelMat, count);
+  const headerInst = new THREE.InstancedMesh(assets.headerLightGeo, assets.headerLightMat, count);
+  const dummy = new THREE.Object3D();
+
+  for (let p = 0; p < count; p++) {
+    const pz = METRO_PLATFORM_POSTER_ZS[p];
+
+    dummy.position.set(wallX, baseFloorY + 0.08, pz);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    plinthInst.setMatrixAt(p, dummy.matrix);
+
+    dummy.position.set(wallX, baseFloorY + 1.35, pz);
+    dummy.updateMatrix();
+    cabinetInst.setMatrixAt(p, dummy.matrix);
+
+    dummy.position.set(wallX, baseFloorY + 2.48, pz);
+    dummy.updateMatrix();
+    headerInst.setMatrixAt(p, dummy.matrix);
+
+    const adIdx = (((stationIdx * 4 + p) % posterLen) + posterLen) % posterLen;
+    const posterFile = POSTER_AD_FILES[adIdx];
+    const posterMat = getOrCreateAdSignMaterial(
+      `/assets/ads/posters/${posterFile}`,
+      0.24,
+      1.05,
+      POSTER_2_3_SET.has(posterFile)
+    );
+    const posterFace = new THREE.Mesh(assets.posterGeo, posterMat);
+    posterFace.position.set(faceX, baseFloorY + 1.34, pz);
+    posterFace.rotation.y = faceRotY;
+    wallGroup.add(posterFace);
+  }
+
+  plinthInst.instanceMatrix.needsUpdate = true;
+  cabinetInst.instanceMatrix.needsUpdate = true;
+  headerInst.instanceMatrix.needsUpdate = true;
+  plinthInst.computeBoundingSphere();
+  cabinetInst.computeBoundingSphere();
+  headerInst.computeBoundingSphere();
+
+  wallGroup.add(plinthInst, cabinetInst, headerInst);
+  return wallGroup;
 }
 
 export function createWinterPerson(isWorker: boolean, coatHex: string): THREE.Group {
@@ -687,6 +812,9 @@ export function buildMetroSystem(
     const backGlass = new THREE.Mesh(new THREE.BoxGeometry(0.08, 2.75, platLen * 0.94), glassScreenMat);
     backGlass.position.set(sideSign * 8.35, 2.85, 0);
     stGroup.add(backGlass);
+
+    // Framed, internally lit Citylight poster wall run (8 panels per station, 1.20 x 2.38 m class)
+    stGroup.add(buildMetroPosterWallRun(sIdx, sideSign));
 
     // Vaulted coffered modernist canopy roof with curved brass architectural ribs & warm cove lighting!
     const canopy = new THREE.Mesh(
@@ -2660,6 +2788,7 @@ export function buildMetroSystem(
   };
 
   const update = (dt: number, elapsed: number, nightFactor: number) => {
+    setAdSignsNightFactor(nightFactor);
     const lampBoost = 0.85 + nightFactor * 0.95;
     for (let i = 0; i < stationLightMats.length; i++) {
       stationLightMats[i].emissiveIntensity = lampBoost;
