@@ -44,6 +44,17 @@ export interface TextureLibrary {
   pedFaceBump: THREE.CanvasTexture;
   pedHairMap: THREE.CanvasTexture;
   pedHairBump: THREE.CanvasTexture;
+  pedFabricDenimMap: THREE.CanvasTexture;
+  pedFabricDenimBump: THREE.CanvasTexture;
+  pedFabricDenimRoughness: THREE.CanvasTexture;
+  pedFabricLeatherMap: THREE.CanvasTexture;
+  pedFabricLeatherBump: THREE.CanvasTexture;
+  pedFabricLeatherRoughness: THREE.CanvasTexture;
+  pedFabricKnitMap: THREE.CanvasTexture;
+  pedFabricKnitBump: THREE.CanvasTexture;
+  pedFabricKnitRoughness: THREE.CanvasTexture;
+  pedFaceWeatheredMap: THREE.CanvasTexture;
+  pedFaceStreetCloseMap: THREE.CanvasTexture;
   newspaperMap: THREE.CanvasTexture;
   phoneScreenMap: THREE.CanvasTexture;
   metroFloorMap: THREE.CanvasTexture;
@@ -2076,6 +2087,164 @@ function buildUtilitySprites(anisotropy: number) {
   const phoneScreenMap = new THREE.CanvasTexture(cPhone);
   phoneScreenMap.colorSpace = THREE.SRGBColorSpace;
 
+  // =========================================================================
+  // ADDITIVE FABRIC & FACE PUNCH-UP VARIANTS (Denim, Leather, Rib-Knit, Faces)
+  // =========================================================================
+  const fabRng = mulberry32(44219);
+  const mkTiledTex = (cv: HTMLCanvasElement, srgb: boolean) => {
+    const t = new THREE.CanvasTexture(cv);
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.anisotropy = anisotropy;
+    return t;
+  };
+
+  // 1. Diagonal Twill Denim (diffuse + bump + roughness)
+  const [cDen, ctxDen] = makeCanvas(512, 512);
+  const [cDenB, ctxDenB] = makeCanvas(512, 512);
+  const [cDenR, ctxDenR] = makeCanvas(512, 512);
+  ctxDen.fillStyle = '#d4dbe4';
+  ctxDen.fillRect(0, 0, 512, 512);
+  ctxDenB.fillStyle = '#808080';
+  ctxDenB.fillRect(0, 0, 512, 512);
+  ctxDenR.fillStyle = '#dcdcdc';
+  ctxDenR.fillRect(0, 0, 512, 512);
+  for (let y = 0; y < 512; y += 3) {
+    for (let x = 0; x < 512; x += 3) {
+      const diag = ((x + y) / 3) % 4;
+      const v = diag === 0 ? 198 : diag === 1 ? 228 : 210 + (fabRng() - 0.5) * 20;
+      ctxDen.fillStyle = `rgb(${v},${v + 2},${v + 6})`;
+      ctxDen.fillRect(x, y, 3, 3);
+      const b = diag === 0 ? 105 : 155 + (fabRng() - 0.5) * 25;
+      ctxDenB.fillStyle = `rgb(${b},${b},${b})`;
+      ctxDenB.fillRect(x, y, 3, 3);
+    }
+  }
+  // Distressed seam stitching & crease fades
+  ctxDen.strokeStyle = 'rgba(235, 198, 128, 0.45)';
+  ctxDen.lineWidth = 2;
+  ctxDen.setLineDash([7, 4]);
+  ctxDen.strokeRect(18, 18, 476, 476);
+  ctxDen.setLineDash([]);
+  const fadeG = ctxDen.createRadialGradient(256, 260, 20, 256, 260, 175);
+  fadeG.addColorStop(0, 'rgba(255,255,255,0.18)');
+  fadeG.addColorStop(1, 'rgba(20,28,42,0.14)');
+  ctxDen.fillStyle = fadeG;
+  ctxDen.fillRect(0, 0, 512, 512);
+
+  const pedFabricDenimMap = mkTiledTex(cDen, true);
+  const pedFabricDenimBump = mkTiledTex(cDenB, false);
+  const pedFabricDenimRoughness = mkTiledTex(cDenR, false);
+
+  // 2. Pebbled Full-Grain Leather (diffuse + bump + roughness)
+  const [cLth, ctxLth] = makeCanvas(512, 512);
+  const [cLthB, ctxLthB] = makeCanvas(512, 512);
+  const [cLthR, ctxLthR] = makeCanvas(512, 512);
+  ctxLth.fillStyle = '#cfcfcf';
+  ctxLth.fillRect(0, 0, 512, 512);
+  ctxLthB.fillStyle = '#707070';
+  ctxLthB.fillRect(0, 0, 512, 512);
+  ctxLthR.fillStyle = '#5e5e5e';
+  ctxLthR.fillRect(0, 0, 512, 512);
+  for (let p = 0; p < 2400; p++) {
+    const px = fabRng() * 512;
+    const py = fabRng() * 512;
+    const pr = 2.2 + fabRng() * 3.8;
+    const shade = 185 + Math.floor(fabRng() * 62);
+    ctxLth.fillStyle = `rgb(${shade},${shade},${shade})`;
+    ctxLth.beginPath();
+    ctxLth.arc(px, py, pr, 0, Math.PI * 2);
+    ctxLth.fill();
+    const bumpS = 140 + Math.floor(fabRng() * 88);
+    ctxLthB.fillStyle = `rgb(${bumpS},${bumpS},${bumpS})`;
+    ctxLthB.beginPath();
+    ctxLthB.arc(px, py, pr * 0.9, 0, Math.PI * 2);
+    ctxLthB.fill();
+    const rghS = 72 + Math.floor(fabRng() * 64);
+    ctxLthR.fillStyle = `rgb(${rghS},${rghS},${rghS})`;
+    ctxLthR.beginPath();
+    ctxLthR.arc(px, py, pr, 0, Math.PI * 2);
+    ctxLthR.fill();
+  }
+  ctxLth.strokeStyle = 'rgba(28, 28, 32, 0.55)';
+  ctxLth.lineWidth = 3;
+  ctxLth.strokeRect(8, 8, 496, 496);
+  const pedFabricLeatherMap = mkTiledTex(cLth, true);
+  const pedFabricLeatherBump = mkTiledTex(cLthB, false);
+  const pedFabricLeatherRoughness = mkTiledTex(cLthR, false);
+
+  // 3. Chunky Winter Rib-Knit Wool (diffuse + bump + roughness)
+  const [cKnt, ctxKnt] = makeCanvas(512, 512);
+  const [cKntB, ctxKntB] = makeCanvas(512, 512);
+  const [cKntR, ctxKntR] = makeCanvas(512, 512);
+  ctxKnt.fillStyle = '#d0d0d4';
+  ctxKnt.fillRect(0, 0, 512, 512);
+  ctxKntB.fillStyle = '#808080';
+  ctxKntB.fillRect(0, 0, 512, 512);
+  ctxKntR.fillStyle = '#f2f2f2';
+  ctxKntR.fillRect(0, 0, 512, 512);
+  for (let x = 0; x < 512; x += 8) {
+    const rib = (x / 8) % 2 === 0;
+    ctxKnt.fillStyle = rib ? 'rgba(242,242,246,0.45)' : 'rgba(130,130,138,0.35)';
+    ctxKnt.fillRect(x, 0, 4, 512);
+    ctxKntB.fillStyle = rib ? '#b4b4b4' : '#585858';
+    ctxKntB.fillRect(x, 0, 4, 512);
+    for (let y = 0; y < 512; y += 8) {
+      const k = 178 + Math.floor(fabRng() * 68);
+      ctxKnt.strokeStyle = `rgb(${k},${k},${k})`;
+      ctxKnt.lineWidth = 1.4;
+      ctxKnt.beginPath();
+      ctxKnt.moveTo(x, y);
+      ctxKnt.lineTo(x + 4, y + 6);
+      ctxKnt.moveTo(x + 8, y);
+      ctxKnt.lineTo(x + 4, y + 6);
+      ctxKnt.stroke();
+    }
+  }
+  const pedFabricKnitMap = mkTiledTex(cKnt, true);
+  const pedFabricKnitBump = mkTiledTex(cKntB, false);
+  const pedFabricKnitRoughness = mkTiledTex(cKntR, false);
+
+  // 4. Additive Rich Character Face Variants layered directly on UV-locked cFaceSkin / cFace
+  const [cFaceWth, ctxFW] = makeCanvas(cFaceSkin.width, cFaceSkin.height);
+  ctxFW.drawImage(cFaceSkin, 0, 0);
+  // Subtle weathered forehead, cheek warmth & nasolabial crease shadow
+  const wW = cFaceWth.width;
+  const wH = cFaceWth.height;
+  const chL = ctxFW.createRadialGradient(wW * 0.43, wH * 0.56, 6, wW * 0.43, wH * 0.56, wW * 0.055);
+  chL.addColorStop(0, 'rgba(182, 84, 72, 0.22)');
+  chL.addColorStop(1, 'rgba(182, 84, 72, 0)');
+  ctxFW.fillStyle = chL;
+  ctxFW.fillRect(0, 0, wW, wH);
+  const chR = ctxFW.createRadialGradient(wW * 0.57, wH * 0.56, 6, wW * 0.57, wH * 0.56, wW * 0.055);
+  chR.addColorStop(0, 'rgba(182, 84, 72, 0.22)');
+  chR.addColorStop(1, 'rgba(182, 84, 72, 0)');
+  ctxFW.fillStyle = chR;
+  ctxFW.fillRect(0, 0, wW, wH);
+  // Subtle jaw stubble/character speckles
+  for (let st = 0; st < 700; st++) {
+    const sx = wW * (0.41 + fabRng() * 0.18);
+    const sy = wH * (0.60 + fabRng() * 0.14);
+    ctxFW.fillStyle = `rgba(54, 42, 34, ${0.06 + fabRng() * 0.1})`;
+    ctxFW.fillRect(sx, sy, 2, 2);
+  }
+  const pedFaceWeatheredMap = new THREE.CanvasTexture(cFaceWth);
+  pedFaceWeatheredMap.colorSpace = THREE.SRGBColorSpace;
+  pedFaceWeatheredMap.anisotropy = anisotropy;
+
+  const [cFaceStr, ctxFStr] = makeCanvas(cFace.width, cFace.height);
+  ctxFStr.drawImage(cFace, 0, 0);
+  const fW = cFaceStr.width;
+  const fH = cFaceStr.height;
+  const lipShade = ctxFStr.createRadialGradient(fW * 0.5, fH * 0.625, 4, fW * 0.5, fH * 0.625, fW * 0.036);
+  lipShade.addColorStop(0, 'rgba(176, 86, 82, 0.24)');
+  lipShade.addColorStop(1, 'rgba(176, 86, 82, 0)');
+  ctxFStr.fillStyle = lipShade;
+  ctxFStr.fillRect(0, 0, fW, fH);
+  const pedFaceStreetCloseMap = new THREE.CanvasTexture(cFaceStr);
+  pedFaceStreetCloseMap.colorSpace = THREE.SRGBColorSpace;
+  pedFaceStreetCloseMap.anisotropy = anisotropy;
+
   return {
     shadowMap,
     raindropMap,
@@ -2090,6 +2259,17 @@ function buildUtilitySprites(anisotropy: number) {
     pedFaceBump,
     pedHairMap,
     pedHairBump,
+    pedFabricDenimMap,
+    pedFabricDenimBump,
+    pedFabricDenimRoughness,
+    pedFabricLeatherMap,
+    pedFabricLeatherBump,
+    pedFabricLeatherRoughness,
+    pedFabricKnitMap,
+    pedFabricKnitBump,
+    pedFabricKnitRoughness,
+    pedFaceWeatheredMap,
+    pedFaceStreetCloseMap,
     newspaperMap,
     phoneScreenMap,
   };
@@ -2393,6 +2573,17 @@ export function createTextureLibrary(renderer: THREE.WebGLRenderer): TextureLibr
     util.pedFaceBump,
     util.pedHairMap,
     util.pedHairBump,
+    util.pedFabricDenimMap,
+    util.pedFabricDenimBump,
+    util.pedFabricDenimRoughness,
+    util.pedFabricLeatherMap,
+    util.pedFabricLeatherBump,
+    util.pedFabricLeatherRoughness,
+    util.pedFabricKnitMap,
+    util.pedFabricKnitBump,
+    util.pedFabricKnitRoughness,
+    util.pedFaceWeatheredMap,
+    util.pedFaceStreetCloseMap,
     util.newspaperMap,
     util.phoneScreenMap,
     metroInt.floorMap,
@@ -2441,6 +2632,17 @@ export function createTextureLibrary(renderer: THREE.WebGLRenderer): TextureLibr
     pedFaceBump: util.pedFaceBump,
     pedHairMap: util.pedHairMap,
     pedHairBump: util.pedHairBump,
+    pedFabricDenimMap: util.pedFabricDenimMap,
+    pedFabricDenimBump: util.pedFabricDenimBump,
+    pedFabricDenimRoughness: util.pedFabricDenimRoughness,
+    pedFabricLeatherMap: util.pedFabricLeatherMap,
+    pedFabricLeatherBump: util.pedFabricLeatherBump,
+    pedFabricLeatherRoughness: util.pedFabricLeatherRoughness,
+    pedFabricKnitMap: util.pedFabricKnitMap,
+    pedFabricKnitBump: util.pedFabricKnitBump,
+    pedFabricKnitRoughness: util.pedFabricKnitRoughness,
+    pedFaceWeatheredMap: util.pedFaceWeatheredMap,
+    pedFaceStreetCloseMap: util.pedFaceStreetCloseMap,
     newspaperMap: util.newspaperMap,
     phoneScreenMap: util.phoneScreenMap,
     metroFloorMap: metroInt.floorMap,

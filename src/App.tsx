@@ -3,19 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Car,
   Compass,
-  MapPin,
   Minus,
   Navigation,
   Plus,
-  TrainFront,
   X,
 } from 'lucide-react';
 import { DrivingEngine, TelemetrySnapshot } from './sim/DrivingEngine';
-import { BUS_STOPS, LANDMARKS, METRO_STATIONS, w2m } from './sim/mapData';
+import { METRO_STATIONS, w2m } from './sim/mapData';
 import { CrtMenuMode, CrtMenuOverlay } from './ui/CrtMenuOverlay';
 
 const BLUEPRINT_IMAGE_URL =
@@ -24,19 +22,6 @@ const BLUEPRINT_IMAGE_URL =
 const MAP_ZOOM_LEVELS = [1.0, 1.4, 2.0, 2.8, 3.8, 5.2];
 const DEFAULT_MINIMAP_ZOOM_IDX = 3; // 2.8x smaller default radius
 const DEFAULT_EXPANDED_ZOOM_IDX = 2; // 2.0x focused radius when inspecting map
-
-type LegendCategory = 'all' | 'stations' | 'districts' | 'bus' | 'car';
-
-interface MapLegendItem {
-  id: string;
-  category: Exclude<LegendCategory, 'all'>;
-  title: string;
-  subtitle: string;
-  worldX: number; // meters
-  worldZ: number; // meters
-  leftPct: number;
-  topPct: number;
-}
 
 function bpToPct(bpX: number, bpZ: number): { leftPct: number; topPct: number } {
   return {
@@ -48,45 +33,6 @@ function bpToPct(bpX: number, bpZ: number): { leftPct: number; topPct: number } 
 function worldToPct(worldX: number, worldZ: number): { leftPct: number; topPct: number } {
   return bpToPct(w2m(worldX), w2m(worldZ));
 }
-
-const STATIC_LEGENDS: MapLegendItem[] = [
-  ...METRO_STATIONS.map((st) => {
-    const pos = worldToPct(st.x, st.z);
-    return {
-      id: `stn_${st.id}`,
-      category: 'stations' as const,
-      title: `${st.code} · ${st.name}`,
-      subtitle: `${st.district} · ${st.zoneKind}`,
-      worldX: st.x,
-      worldZ: st.z,
-      ...pos,
-    };
-  }),
-  ...LANDMARKS.map((lm) => {
-    const pos = worldToPct(lm.x, lm.z);
-    return {
-      id: `lm_${lm.id}`,
-      category: 'districts' as const,
-      title: lm.label,
-      subtitle: 'District Point',
-      worldX: lm.x,
-      worldZ: lm.z,
-      ...pos,
-    };
-  }),
-  ...BUS_STOPS.map((bs) => {
-    const pos = worldToPct(bs.x, bs.z);
-    return {
-      id: `bus_${bs.id}`,
-      category: 'bus' as const,
-      title: bs.name,
-      subtitle: `Bus Routes ${bs.routes}`,
-      worldX: bs.x,
-      worldZ: bs.z,
-      ...pos,
-    };
-  }),
-];
 
 export default function App() {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -139,7 +85,11 @@ export default function App() {
     npcSubtitle: '',
   });
 
-  const [menuMode, setMenuMode] = useState<CrtMenuMode | null>('start');
+  const [menuMode, setMenuMode] = useState<CrtMenuMode | null>(() =>
+    typeof window !== 'undefined' && window.location.search.includes('stillMode=1')
+      ? null
+      : 'start'
+  );
   const [crtWarp, setCrtWarp] = useState(true);
   const [muted, setMuted] = useState(false);
 
@@ -148,13 +98,11 @@ export default function App() {
   const districtFadeTimerRef = useRef<number | null>(null);
   const prevDistrictRef = useRef<string>('');
 
-  // Map zoom (D-pad Left/Right & +/-) + Interactive Map Legend state
+  // Map zoom (D-pad Left/Right & +/-)
   const [mapExpanded, setMapExpanded] = useState(false);
   const [mapImgFailed, setMapImgFailed] = useState(false);
   const [minimapZoomIdx, setMinimapZoomIdx] = useState(DEFAULT_MINIMAP_ZOOM_IDX);
   const [expandedZoomIdx, setExpandedZoomIdx] = useState(DEFAULT_EXPANDED_ZOOM_IDX);
-  const [legendCategory, setLegendCategory] = useState<LegendCategory>('all');
-  const [selectedLegendId, setSelectedLegendId] = useState<string | null>(null);
   const [mapFocusPct, setMapFocusPct] = useState<{ leftPct: number; topPct: number }>({
     leftPct: 50,
     topPct: 50,
@@ -172,58 +120,6 @@ export default function App() {
   menuModeRef.current = menuMode;
   const mapExpandedRef = useRef(mapExpanded);
   mapExpandedRef.current = mapExpanded;
-
-  const carLegendItem: MapLegendItem = useMemo(() => {
-    const pos = bpToPct(telemetry.carMapX, telemetry.carMapZ);
-    return {
-      id: 'car_player',
-      category: 'car',
-      title: 'Your Car',
-      subtitle: telemetry.walkMode ? 'Parked / En Route' : 'Active Vehicle',
-      worldX: telemetry.carMapX * 0.72,
-      worldZ: telemetry.carMapZ * 0.72,
-      ...pos,
-    };
-  }, [telemetry.carMapX, telemetry.carMapZ, telemetry.walkMode]);
-
-  const allLegends = useMemo(
-    () => [carLegendItem, ...STATIC_LEGENDS],
-    [carLegendItem]
-  );
-
-  const visibleLegends = useMemo(() => {
-    if (legendCategory === 'all') return allLegends;
-    return allLegends.filter((item) => item.category === legendCategory);
-  }, [allLegends, legendCategory]);
-
-  const selectedLegend = useMemo(
-    () => allLegends.find((item) => item.id === selectedLegendId) ?? null,
-    [allLegends, selectedLegendId]
-  );
-
-  const visibleLegendsRef = useRef(visibleLegends);
-  visibleLegendsRef.current = visibleLegends;
-  const selectedLegendIdRef = useRef(selectedLegendId);
-  selectedLegendIdRef.current = selectedLegendId;
-
-  const selectLegendItem = (item: MapLegendItem) => {
-    setSelectedLegendId(item.id);
-    setMapFocusPct({ leftPct: item.leftPct, topPct: item.topPct });
-    setExpandedZoomIdx((idx) => Math.max(idx, 2)); // zoom into at least 2.0x to frame legend clearly
-  };
-
-  const stepLegendSelection = (delta: number) => {
-    const list = visibleLegendsRef.current;
-    if (list.length === 0) return;
-    const curIdx = list.findIndex((x) => x.id === selectedLegendIdRef.current);
-    const nextIdx =
-      curIdx < 0
-        ? delta > 0
-          ? 0
-          : list.length - 1
-        : (curIdx + delta + list.length) % list.length;
-    selectLegendItem(list[nextIdx]);
-  };
 
   const stepZoom = (delta: number) => {
     if (mapExpandedRef.current) {
@@ -252,7 +148,6 @@ export default function App() {
     );
     engine.setMapCallbacks({
       onZoomDelta: (delta) => stepZoom(delta),
-      onLegendNav: (delta) => stepLegendSelection(delta),
       isExpanded: () => mapExpandedRef.current,
     });
     engine.setPaused(menuModeRef.current !== null);
@@ -276,9 +171,6 @@ export default function App() {
         stepZoom(1);
       } else if (e.code === 'Minus' || e.code === 'NumpadSubtract' || e.code === 'BracketLeft') {
         stepZoom(-1);
-      } else if (mapExpandedRef.current && (e.code === 'ArrowUp' || e.code === 'ArrowDown')) {
-        e.preventDefault();
-        stepLegendSelection(e.code === 'ArrowDown' ? 1 : -1);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -297,9 +189,7 @@ export default function App() {
   // Center expanded map cleanly around player when first opened
   useEffect(() => {
     if (mapExpanded) {
-      if (!selectedLegendIdRef.current) {
-        setMapFocusPct(bpToPct(telemetry.mapX, telemetry.mapZ));
-      }
+      setMapFocusPct(bpToPct(telemetry.mapX, telemetry.mapZ));
     }
   }, [mapExpanded]);
 
@@ -370,9 +260,6 @@ export default function App() {
     : telemetry.walkMode
     ? Math.min(100, Math.max(6, (telemetry.speedKmh / 30) * 100))
     : Math.min(100, Math.max(8, ((telemetry.rpm - 700) / 6900) * 100));
-
-  const playerWorldX = telemetry.mapX * 0.72;
-  const playerWorldZ = telemetry.mapZ * 0.72;
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#04070e]">
@@ -529,18 +416,6 @@ export default function App() {
                 />
               )}
 
-              {/* Active selected legend target ring */}
-              {selectedLegend && (
-                <div
-                  className="absolute w-4 h-4 rounded-full border-2 border-amber-300 bg-amber-400/25 pointer-events-none"
-                  style={{
-                    left: `${selectedLegend.leftPct}%`,
-                    top: `${selectedLegend.topPct}%`,
-                    transform: `translate(-50%, -50%) scale(${1 / minimapZoom})`,
-                  }}
-                />
-              )}
-
               {/* Player heading marker */}
               <div
                 className="absolute w-4 h-4 pointer-events-none"
@@ -635,18 +510,6 @@ export default function App() {
             <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/10 bg-[#070c12]">
               <div className="flex items-center gap-3">
                 <span className="text-sm font-semibold text-slate-100">Map</span>
-                {selectedLegend && (
-                  <span className="px-2 py-0.5 rounded bg-amber-400/15 border border-amber-400/40 text-xs text-amber-200 font-mono-hud">
-                    {selectedLegend.title} ·{' '}
-                    {Math.round(
-                      Math.hypot(
-                        selectedLegend.worldX - playerWorldX,
-                        selectedLegend.worldZ - playerWorldZ
-                      )
-                    )}
-                    m
-                  </span>
-                )}
               </div>
               <div className="flex items-center gap-1.5">
                 <button
@@ -690,8 +553,8 @@ export default function App() {
               </div>
             </div>
 
-            {/* Body: Zoomable/Pannable Map + Selectable Legend Drawer */}
-            <div className="flex flex-col lg:flex-row">
+            {/* Body: Clean Zoomable/Pannable Map without old key legend overlay */}
+            <div className="flex flex-col">
               <div
                 ref={mapViewportRef}
                 onWheel={(e) => {
@@ -724,7 +587,7 @@ export default function App() {
                 onPointerLeave={() => {
                   if (dragPanRef.current) dragPanRef.current.active = false;
                 }}
-                className="relative flex-1 aspect-[16/9] bg-[#060b12] overflow-hidden cursor-grab active:cursor-grabbing select-none"
+                className="relative w-full aspect-[16/9] bg-[#060b12] overflow-hidden cursor-grab active:cursor-grabbing select-none"
               >
                 <div
                   className="absolute inset-0 origin-top-left transition-transform duration-150 ease-out"
@@ -739,50 +602,22 @@ export default function App() {
                     className="w-full h-full object-fill select-none pointer-events-none"
                   />
 
-                  {/* Interactive clickable legend pins */}
-                  {visibleLegends.map((item) => {
-                    const isSelected = item.id === selectedLegendId;
-                    return (
-                      <button
-                        key={item.id}
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          selectLegendItem(item);
-                        }}
-                        title={item.title}
-                        className="absolute flex items-center justify-center focus:outline-none"
-                        style={{
-                          left: `${item.leftPct}%`,
-                          top: `${item.topPct}%`,
-                          transform: `translate(-50%, -50%) scale(${1 / expandedZoom})`,
-                          zIndex: isSelected ? 20 : item.category === 'stations' ? 12 : 8,
-                        }}
-                      >
-                        <span
-                          className={`flex items-center justify-center rounded-full border shadow-md transition-transform ${
-                            isSelected
-                              ? 'w-7 h-7 bg-amber-400 text-slate-950 border-white ring-4 ring-amber-400/45 scale-110'
-                              : item.category === 'stations'
-                              ? 'w-5 h-5 bg-cyan-500/90 hover:bg-cyan-400 text-slate-950 border-white/80'
-                              : item.category === 'car'
-                              ? 'w-5 h-5 bg-amber-500 text-slate-950 border-white/90'
-                              : item.category === 'districts'
-                              ? 'w-4 h-4 bg-emerald-400/90 hover:bg-emerald-300 text-slate-950 border-slate-950'
-                              : 'w-2.5 h-2.5 bg-slate-300/80 hover:bg-white border-slate-950'
-                          }`}
-                        >
-                          {item.category === 'stations' ? (
-                            <TrainFront className="w-3 h-3" />
-                          ) : item.category === 'car' ? (
-                            <Car className="w-3 h-3" />
-                          ) : item.category === 'districts' ? (
-                            <MapPin className="w-2.5 h-2.5" />
-                          ) : null}
-                        </span>
-                      </button>
-                    );
-                  })}
+                  {/* Live Car Blip (present on map & Call Your Car) */}
+                  <div
+                    title="Your Car"
+                    className={`absolute flex items-center justify-center rounded-full border border-white/90 shadow-md pointer-events-none z-20 ${
+                      telemetry.carCallActive
+                        ? 'w-6 h-6 bg-amber-400 text-slate-950 ring-4 ring-amber-400/50 animate-pulse'
+                        : 'w-5 h-5 bg-amber-500 text-slate-950'
+                    }`}
+                    style={{
+                      left: `${carPct.leftPct}%`,
+                      top: `${carPct.topPct}%`,
+                      transform: `translate(-50%, -50%) scale(${1 / expandedZoom})`,
+                    }}
+                  >
+                    <Car className="w-3 h-3" />
+                  </div>
 
                   {/* Player Arrow */}
                   <div
@@ -802,63 +637,6 @@ export default function App() {
                       />
                     </svg>
                   </div>
-                </div>
-              </div>
-
-              {/* Right Sidebar: Scrollable Legend Selector */}
-              <div className="w-full lg:w-80 border-t lg:border-t-0 lg:border-l border-white/10 bg-[#080d14] flex flex-col max-h-64 lg:max-h-[540px]">
-                <div className="p-2.5 border-b border-white/10 flex flex-wrap gap-1.5">
-                  {(
-                    [
-                      ['all', 'All'],
-                      ['stations', 'Train Stations'],
-                      ['districts', 'Districts'],
-                      ['bus', 'Bus Stops'],
-                      ['car', 'Car'],
-                    ] as [LegendCategory, string][]
-                  ).map(([cat, label]) => (
-                    <button
-                      key={cat}
-                      type="button"
-                      onClick={() => setLegendCategory(cat)}
-                      className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
-                        legendCategory === cat
-                          ? 'bg-sky-400 text-slate-950'
-                          : 'bg-white/5 hover:bg-white/15 text-slate-300'
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-1">
-                  {visibleLegends.map((item) => {
-                    const active = item.id === selectedLegendId;
-                    const distM = Math.round(
-                      Math.hypot(item.worldX - playerWorldX, item.worldZ - playerWorldZ)
-                    );
-                    return (
-                      <button
-                        key={item.id}
-                        type="button"
-                        onClick={() => selectLegendItem(item)}
-                        className={`w-full text-left px-2.5 py-2 rounded-md border transition-colors flex items-center justify-between gap-2 ${
-                          active
-                            ? 'bg-amber-400/15 border-amber-400/60 text-amber-100'
-                            : 'bg-white/[0.03] hover:bg-white/10 border-transparent text-slate-200'
-                        }`}
-                      >
-                        <div className="min-w-0">
-                          <div className="text-xs font-medium truncate">{item.title}</div>
-                          <div className="text-[11px] text-slate-400 truncate">{item.subtitle}</div>
-                        </div>
-                        <span className="text-[11px] font-mono-hud text-slate-400 shrink-0">
-                          {distM}m
-                        </span>
-                      </button>
-                    );
-                  })}
                 </div>
               </div>
             </div>

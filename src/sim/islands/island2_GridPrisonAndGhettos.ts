@@ -86,13 +86,15 @@ export function buildIsland2GridPrisonAndGhettos(
     crossBeam.position.set(bx, deckY + 7.4, 86);
     root.add(crossBeam);
 
-    // Bridge side crash barriers (solid visual rails)
+    // Bridge side crash barriers (solid visual rails + edge colliders)
     const railL = new THREE.Mesh(new THREE.BoxGeometry(38.2, 1.15, 0.55), concreteMat);
     railL.position.set(bx, deckY + 0.55, 76.2);
     root.add(railL);
     const railR = new THREE.Mesh(new THREE.BoxGeometry(38.2, 1.15, 0.55), concreteMat);
     railR.position.set(bx, deckY + 0.55, 95.8);
     root.add(railR);
+    collisionWorld.addBox(bx, 76.0, 38.2, 0.8, 0);
+    collisionWorld.addBox(bx, 96.0, 38.2, 0.8, 0);
   }
 
   // Gate 12 Security Checkpoint Arch at West Entry (x = 560, z = 86)

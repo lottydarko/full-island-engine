@@ -495,7 +495,7 @@ export class IcyVehiclePhysics {
     const newSurface = getSurfaceAt(s.x, s.z);
     const newIsRoad = newSurface === 'asphalt' || newSurface === 'puddle';
     const terrainH = getTerrainHeight(s.x, s.z);
-    const baseGroundY = newIsRoad ? 0.088 : Math.max(0.02, terrainH + 0.02);
+    const baseGroundY = newIsRoad ? Math.max(0.088, terrainH + 0.02) : Math.max(0.02, terrainH + 0.02);
 
     // Sample driveable low ledges (roundabout granite islands, monument steps, low plazas!)
     const ledgeSample = collisionWorld.sampleLedgeHeight(s.x, s.z);

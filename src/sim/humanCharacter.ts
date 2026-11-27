@@ -26,7 +26,8 @@ export type OutfitStyleType =
   // Grand Archipelago Factions & Station Staff (reusing exact same HumanRig!)
   | 'soviet_soldier'
   | 'pow_prisoner'
-  | 'station_barista';
+  | 'station_barista'
+  | 'gang_2059';
 
 export type CommuterActivityType = 'none' | 'newspaper' | 'phone' | 'cigarette';
 
@@ -483,7 +484,8 @@ function buildSkinnedJacketAndSleevesGeo(
     outfit === 'cardigan_scarf' ||
     outfit === 'metro_worker' ||
     outfit === 'pow_prisoner' ||
-    outfit === 'station_barista';
+    outfit === 'station_barista' ||
+    outfit === 'gang_2059';
   const isBlazer = outfit === 'tailored_blazer' || outfit === 'transit_security';
   const isPuffer = outfit === 'puffer_jacket';
 
@@ -2651,7 +2653,8 @@ export function createRiggedHuman(
     outfit === 'rail_engineer' ||
     outfit === 'soviet_soldier' ||
     outfit === 'pow_prisoner' ||
-    outfit === 'station_barista';
+    outfit === 'station_barista' ||
+    outfit === 'gang_2059';
 
   const rAct = variantIdx % 10;
   const activity: CommuterActivityType =
@@ -2721,6 +2724,11 @@ export function createRiggedHuman(
     jacketColor = '#30241e';
     pantsColor = '#1c1b20';
     hatColor = '#5e3c28';
+  } else if (outfit === 'gang_2059') {
+    // 2059 Russia darker tactical trench & industrial street silhouette
+    jacketColor = variantIdx % 2 === 0 ? '#14171e' : '#1f161a';
+    pantsColor = '#0f1218';
+    hatColor = variantIdx % 3 === 0 ? '#2b1218' : '#13161c';
   } else if (outfit === 'leather_biker') {
     jacketColor = variantIdx % 2 === 0 ? '#24252a' : '#4a2b20';
   }
@@ -2739,58 +2747,84 @@ export function createRiggedHuman(
   });
   applyHumanSkinShader(skinMat, 'human-skin-sss-v1');
 
-  // Close-up rigged faces use pure pore/crease/lip pedFaceSkinMap (NO double painted 2D eyes!) + SSS!
+  // Close-up rigged faces use pure pore/crease/lip pedFaceSkinMap or weathered variant (NO double painted 2D eyes!) + SSS!
+  const useWeatheredFace =
+    outfit === 'leather_biker' ||
+    outfit === 'gang_2059' ||
+    outfit === 'rail_engineer' ||
+    variantIdx % 2 === 1;
   const faceMat = new THREE.MeshPhysicalMaterial({
     color: skinColor,
-    map: textures.pedFaceSkinMap,
+    map: useWeatheredFace ? textures.pedFaceWeatheredMap : textures.pedFaceSkinMap,
     bumpMap: textures.pedFaceBump,
-    bumpScale: 0.0085,
-    roughness: 0.44,
+    bumpScale: 0.0115,
+    roughness: 0.42,
     metalness: 0.0,
-    clearcoat: 0.16,
-    clearcoatRoughness: 0.54,
-    sheen: 0.42,
-    sheenColor: new THREE.Color('#ffd6be'),
-    sheenRoughness: 0.64,
+    clearcoat: 0.18,
+    clearcoatRoughness: 0.50,
+    sheen: 0.48,
+    sheenColor: new THREE.Color('#ffccb2'),
+    sheenRoughness: 0.58,
   });
   applyHumanSkinShader(faceMat, 'human-face-sss-v1');
 
-  const isLeather = outfit === 'leather_biker';
+  const isLeather = outfit === 'leather_biker' || outfit === 'gang_2059';
   const isPuffer = outfit === 'puffer_jacket';
+  const isKnit =
+    outfit === 'cardigan_scarf' || outfit === 'hoodie_parka' || outfit === 'pow_prisoner';
   const coatMat = new THREE.MeshPhysicalMaterial({
     color: jacketColor,
-    map: textures.pedClothingMap,
-    roughnessMap: isLeather ? undefined : textures.pedClothingRoughness,
-    bumpMap: textures.pedClothingBump,
-    bumpScale: isLeather ? 0.014 : 0.036,
-    roughness: isLeather ? 0.35 : isPuffer ? 0.46 : 0.94,
+    map: isLeather
+      ? textures.pedFabricLeatherMap
+      : isKnit
+      ? textures.pedFabricKnitMap
+      : textures.pedClothingMap,
+    roughnessMap: isLeather
+      ? textures.pedFabricLeatherRoughness
+      : isKnit
+      ? textures.pedFabricKnitRoughness
+      : textures.pedClothingRoughness,
+    bumpMap: isLeather
+      ? textures.pedFabricLeatherBump
+      : isKnit
+      ? textures.pedFabricKnitBump
+      : textures.pedClothingBump,
+    bumpScale: isLeather ? 0.024 : isKnit ? 0.044 : 0.032,
+    roughness: isLeather ? 0.34 : isPuffer ? 0.38 : isKnit ? 0.96 : 0.88,
     metalness: isLeather ? 0.14 : 0.01,
-    sheen: isLeather ? 0.16 : 0.92,
-    sheenColor: new THREE.Color(jacketColor).lerp(new THREE.Color('#f4f8ff'), 0.46),
-    sheenRoughness: 0.56,
+    clearcoat: isLeather ? 0.18 : isPuffer ? 0.22 : 0.0,
+    clearcoatRoughness: 0.42,
+    sheen: isLeather ? 0.22 : 0.94,
+    sheenColor: new THREE.Color(jacketColor).lerp(new THREE.Color('#f4f8ff'), 0.48),
+    sheenRoughness: isKnit ? 0.68 : 0.48,
     side: THREE.DoubleSide,
   });
   applyClothWindShader(coatMat, windUniform, 'cloth-wind-pbr-v3');
 
+  const isTailored =
+    outfit === 'trench_coat' || outfit === 'tailored_blazer' || outfit === 'transit_security';
   const pantsMat = new THREE.MeshPhysicalMaterial({
     color: pantsColor,
-    map: textures.pedClothingMap,
-    roughnessMap: textures.pedClothingRoughness,
-    bumpMap: textures.pedClothingBump,
-    bumpScale: 0.030,
-    roughness: 0.96,
+    map: isTailored ? textures.pedClothingMap : textures.pedFabricDenimMap,
+    roughnessMap: isTailored ? textures.pedClothingRoughness : textures.pedFabricDenimRoughness,
+    bumpMap: isTailored ? textures.pedClothingBump : textures.pedFabricDenimBump,
+    bumpScale: isTailored ? 0.024 : 0.038,
+    roughness: isTailored ? 0.82 : 0.94,
     metalness: 0.01,
-    sheen: 0.78,
-    sheenColor: new THREE.Color(pantsColor).lerp(new THREE.Color('#dde6f2'), 0.34),
-    sheenRoughness: 0.64,
+    sheen: isTailored ? 0.54 : 0.84,
+    sheenColor: new THREE.Color(pantsColor).lerp(new THREE.Color('#dde6f2'), 0.36),
+    sheenRoughness: 0.62,
     side: THREE.DoubleSide,
   });
   applyClothWindShader(pantsMat, windUniform, 'cloth-wind-pbr-v3');
 
   const shoeMat = new THREE.MeshStandardMaterial({
     color: shoeColor,
-    roughness: 0.44,
-    metalness: 0.14,
+    map: textures.pedFabricLeatherMap,
+    bumpMap: textures.pedFabricLeatherBump,
+    bumpScale: 0.016,
+    roughness: 0.36,
+    metalness: 0.16,
   });
   const hairMat = new THREE.MeshPhysicalMaterial({
     color: hairColor,
@@ -2820,10 +2854,10 @@ export function createRiggedHuman(
   });
   const scarfMat = new THREE.MeshPhysicalMaterial({
     color: scarfColor,
-    map: textures.pedClothingMap,
-    roughnessMap: textures.pedClothingRoughness,
-    bumpMap: textures.pedClothingBump,
-    bumpScale: 0.038,
+    map: textures.pedFabricKnitMap,
+    roughnessMap: textures.pedFabricKnitRoughness,
+    bumpMap: textures.pedFabricKnitBump,
+    bumpScale: 0.044,
     roughness: 0.98,
     metalness: 0.0,
     sheen: 0.95,

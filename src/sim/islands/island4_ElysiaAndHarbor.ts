@@ -140,6 +140,7 @@ export function buildIsland4ElysiaAndHarbor(
       const rail = new THREE.Mesh(new THREE.BoxGeometry(20.4, 1.15, 0.45), ggRedMat);
       rail.position.set(bx, dy + 0.55, rz);
       root.add(rail);
+      collisionWorld.addBox(bx, rz, 20.4, 0.75, 0);
     }
   }
 

@@ -752,6 +752,124 @@ function createRoadRibbonGeometry(
   return geo;
 }
 
+/**
+ * Builds a continuous raised concrete sidewalk slab + vertical granite curb lip on one side of a road,
+ * skipping quads inside intersection/crosswalk clearances so cross-streets stay cleanly unobstructed.
+ */
+function createRaisedSidewalkGeometry(
+  rawPoints: Vec2[],
+  roadWidth: number,
+  yTopOffset: number,
+  yCurbBottom: number,
+  walkWidth: number,
+  side: -1 | 1,
+  uvRepeatMeters = 10
+): THREE.BufferGeometry {
+  const points: Vec2[] = [];
+  for (let i = 0; i < rawPoints.length; i++) {
+    const cur = rawPoints[i];
+    if (i > 0) {
+      const prev = rawPoints[i - 1];
+      const segLen = Math.hypot(cur.x - prev.x, cur.z - prev.z);
+      if (segLen > 12) {
+        const steps = Math.ceil(segLen / 10);
+        for (let s = 1; s < steps; s++) {
+          const t = s / steps;
+          points.push({
+            x: prev.x + (cur.x - prev.x) * t,
+            z: prev.z + (cur.z - prev.z) * t,
+          });
+        }
+      }
+    }
+    points.push(cur);
+  }
+
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+  const innerOff = roadWidth * 0.5 + 0.12;
+  const outerOff = innerOff + walkWidth;
+  let accumDist = 0;
+
+  const pushVert = (x: number, y: number, z: number, u: number, v: number) => {
+    positions.push(x, y, z);
+    uvs.push(u, v);
+  };
+
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[i];
+    const p1 = points[i + 1];
+    const dx = p1.x - p0.x;
+    const dz = p1.z - p0.z;
+    const len = Math.hypot(dx, dz);
+    if (len < 0.4) continue;
+
+    const nx = (-dz / len) * side;
+    const nz = (dx / len) * side;
+
+    const midCenterOff = (innerOff + outerOff) * 0.5;
+    const mx = (p0.x + p1.x) * 0.5 + nx * midCenterOff;
+    const mz = (p0.z + p1.z) * 0.5 + nz * midCenterOff;
+    if (isInCrosswalkClearance(mx, mz, 2.2)) {
+      accumDist += len;
+      continue;
+    }
+
+    const elev0 = getRoadElevationAt(p0.x, p0.z);
+    const elev1 = getRoadElevationAt(p1.x, p1.z);
+    const yTop0 = elev0 + yTopOffset;
+    const yBot0 = elev0 + yCurbBottom;
+    const yTop1 = elev1 + yTopOffset;
+    const yBot1 = elev1 + yCurbBottom;
+
+    const v0 = accumDist / uvRepeatMeters;
+    const v1 = (accumDist + len) / uvRepeatMeters;
+    accumDist += len;
+
+    const ix0 = p0.x + nx * innerOff;
+    const iz0 = p0.z + nz * innerOff;
+    const ox0 = p0.x + nx * outerOff;
+    const oz0 = p0.z + nz * outerOff;
+
+    const ix1 = p1.x + nx * innerOff;
+    const iz1 = p1.z + nz * innerOff;
+    const ox1 = p1.x + nx * outerOff;
+    const oz1 = p1.z + nz * outerOff;
+
+    // 1. Vertical curb lip facing road (4 verts)
+    const cBase = positions.length / 3;
+    pushVert(ix0, yBot0, iz0, 0, v0);
+    pushVert(ix0, yTop0, iz0, 0.1, v0);
+    pushVert(ix1, yBot1, iz1, 0, v1);
+    pushVert(ix1, yTop1, iz1, 0.1, v1);
+    if (side > 0) {
+      indices.push(cBase, cBase + 2, cBase + 1, cBase + 1, cBase + 2, cBase + 3);
+    } else {
+      indices.push(cBase, cBase + 1, cBase + 2, cBase + 1, cBase + 3, cBase + 2);
+    }
+
+    // 2. Top raised concrete walkway slab (4 verts)
+    const tBase = positions.length / 3;
+    pushVert(ix0, yTop0, iz0, 0, v0);
+    pushVert(ox0, yTop0, oz0, 1, v0);
+    pushVert(ix1, yTop1, iz1, 0, v1);
+    pushVert(ox1, yTop1, oz1, 1, v1);
+    if (side > 0) {
+      indices.push(tBase, tBase + 2, tBase + 1, tBase + 1, tBase + 2, tBase + 3);
+    } else {
+      indices.push(tBase, tBase + 1, tBase + 2, tBase + 1, tBase + 3, tBase + 2);
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
 // Ornate Russian Orthodox Onion-Dome Cathedral
 function createOrthodoxCathedral(
   scale: number,
@@ -1377,16 +1495,35 @@ export function buildCityWorld(
         ? 0.076
         : 0.064 + (idx % 4) * 0.002;
 
-    if (seg.kind !== 'bridge') {
+    if (seg.kind !== 'bridge' && seg.kind !== 'ramp') {
+      // Base continuous concrete apron underneath intersection corners
       const curbGeo = createRoadRibbonGeometry(
         seg.points,
-        seg.width + 4.4,
+        seg.width + 6.8,
         0.032,
         10
       );
       const curbMesh = new THREE.Mesh(curbGeo, sidewalkMat);
       curbMesh.receiveShadow = true;
       roadGroup.add(curbMesh);
+
+      // True raised 3.2m concrete sidewalks + vertical curb lips cleanly outside road asphalt
+      for (const side of [-1, 1] as const) {
+        const swGeo = createRaisedSidewalkGeometry(
+          seg.points,
+          seg.width,
+          baseY + 0.072,
+          baseY - 0.025,
+          3.2,
+          side,
+          10
+        );
+        if (swGeo.attributes.position.count > 0) {
+          const swMesh = new THREE.Mesh(swGeo, sidewalkMat);
+          swMesh.receiveShadow = true;
+          roadGroup.add(swMesh);
+        }
+      }
     }
 
     const useDoubleYellow = seg.kind !== 'street';

@@ -178,4 +178,58 @@ export class DrivingAudioEngine {
     }
     this.initialized = false;
   }
+
+  /** Procedural punchy gunshot transient for shared weapon (carbine) */
+  public playGunshot(distanceM = 0) {
+    if (this.muted || this.paused) return;
+    if (!this.initialized) this.start();
+    if (!this.ctx || !this.masterGain) return;
+    if (this.ctx.state === 'suspended') {
+      void this.ctx.resume();
+    }
+    try {
+      const ctx = this.ctx;
+      const now = ctx.currentTime;
+      const atten = Math.max(0.04, 1 / (1 + distanceM * 0.085));
+
+      // Sharp crack noise burst
+      const len = Math.floor(ctx.sampleRate * 0.14);
+      const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) {
+        data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (ctx.sampleRate * 0.028));
+      }
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(1400 - Math.min(750, distanceM * 14), now);
+      bp.Q.value = 0.85;
+
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.45 * atten, now);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+
+      src.connect(bp);
+      bp.connect(g);
+      g.connect(this.masterGain);
+      src.start(now);
+
+      // Low mechanical thump
+      const osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(145, now);
+      osc.frequency.exponentialRampToValueAtTime(38, now + 0.08);
+      const og = ctx.createGain();
+      og.gain.setValueAtTime(0.32 * atten, now);
+      og.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+      osc.connect(og);
+      og.connect(this.masterGain);
+      osc.start(now);
+      osc.stop(now + 0.095);
+    } catch {
+      // ignore audio glitch
+    }
+  }
 }

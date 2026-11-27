@@ -2764,7 +2764,165 @@ export class CollisionWorld {
 
     return { x: px, z: pz, hit, nx: outNx, nz: outNz };
   }
+
+  /**
+   * 2D XZ segment-vs-circle & segment-vs-OBB line-of-sight test for AI detection & gunfire.
+   */
+  hasLineOfSight(x0: number, z0: number, x1: number, z1: number): boolean {
+    const dx = x1 - x0;
+    const dz = z1 - z0;
+    const len2 = dx * dx + dz * dz;
+    if (len2 < 1e-4) return true;
+
+    for (let i = 0; i < this.circles.length; i++) {
+      const c = this.circles[i];
+      const fx = x0 - c.cx;
+      const fz = z0 - c.cz;
+      const t = Math.max(0, Math.min(1, -(fx * dx + fz * dz) / len2));
+      const px = fx + dx * t;
+      const pz = fz + dz * t;
+      if (px * px + pz * pz < c.r * c.r * 0.92) return false;
+    }
+
+    for (let i = 0; i < this.boxes.length; i++) {
+      const b = this.boxes[i];
+      // Broad-phase reject against segment midpoint
+      const midX = (x0 + x1) * 0.5 - b.cx;
+      const midZ = (z0 + z1) * 0.5 - b.cz;
+      const halfSeg = Math.sqrt(len2) * 0.5 + b.radius;
+      if (midX * midX + midZ * midZ > halfSeg * halfSeg) continue;
+
+      // Transform segment into OBB local space
+      const lx0 = (x0 - b.cx) * b.cos - (z0 - b.cz) * b.sin;
+      const lz0 = (x0 - b.cx) * b.sin + (z0 - b.cz) * b.cos;
+      const lx1 = (x1 - b.cx) * b.cos - (z1 - b.cz) * b.sin;
+      const lz1 = (x1 - b.cx) * b.sin + (z1 - b.cz) * b.cos;
+      const ldx = lx1 - lx0;
+      const ldz = lz1 - lz0;
+
+      let tMin = 0;
+      let tMax = 1;
+      const hx = b.hx * 0.96;
+      const hz = b.hz * 0.96;
+
+      if (Math.abs(ldx) < 1e-6) {
+        if (lx0 < -hx || lx0 > hx) continue;
+      } else {
+        const inv = 1 / ldx;
+        let t1 = (-hx - lx0) * inv;
+        let t2 = (hx - lx0) * inv;
+        if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+        tMin = Math.max(tMin, t1);
+        tMax = Math.min(tMax, t2);
+        if (tMin > tMax) continue;
+      }
+
+      if (Math.abs(ldz) < 1e-6) {
+        if (lz0 < -hz || lz0 > hz) continue;
+      } else {
+        const inv = 1 / ldz;
+        let t1 = (-hz - lz0) * inv;
+        let t2 = (hz - lz0) * inv;
+        if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+        tMin = Math.max(tMin, t1);
+        tMax = Math.min(tMax, t2);
+        if (tMin > tMax) continue;
+      }
+
+      if (tMax > 0.02 && tMin < 0.98) return false;
+    }
+
+    return true;
+  }
 }
+
+export interface GangTerritorySpec {
+  id: string;
+  districtId: 'D1' | 'D8';
+  label: string;
+  anchorX: number;
+  anchorZ: number;
+  crewSize: number;
+  patrolRadius: number;
+  patrolPoints: Vec2[];
+}
+
+/**
+ * Gang crew territories in D8 Black Market Quay & D1 Nightlife.
+ */
+export const GANG_TERRITORIES: GangTerritorySpec[] = [
+  {
+    id: 'crew_d8_quay_east',
+    districtId: 'D8',
+    label: 'D8 Black Market Quay East',
+    anchorX: 1648,
+    anchorZ: 442,
+    crewSize: 5,
+    patrolRadius: 14,
+    patrolPoints: [
+      { x: 1648, z: 442 },
+      { x: 1692, z: 438 },
+      { x: 1668, z: 446 },
+      { x: 1612, z: 442 },
+    ],
+  },
+  {
+    id: 'crew_d8_quay_west',
+    districtId: 'D8',
+    label: 'D8 Black Market Quay Approach',
+    anchorX: 1558,
+    anchorZ: 442,
+    crewSize: 4,
+    patrolRadius: 12,
+    patrolPoints: [
+      { x: 1558, z: 442 },
+      { x: 1522, z: 445 },
+      { x: 1582, z: 438 },
+    ],
+  },
+  {
+    id: 'crew_d1_casino_row',
+    districtId: 'D1',
+    label: 'D1 Nightlife Casino Row',
+    anchorX: m2w(-320),
+    anchorZ: m2w(-232),
+    crewSize: 4,
+    patrolRadius: 11,
+    patrolPoints: [
+      { x: m2w(-320), z: m2w(-232) },
+      { x: m2w(-348), z: m2w(-250) },
+      { x: m2w(-292), z: m2w(-250) },
+    ],
+  },
+  {
+    id: 'crew_d1_arcade_plaza',
+    districtId: 'D1',
+    label: 'D1 Nightlife Arcade Strip',
+    anchorX: m2w(-430),
+    anchorZ: m2w(-352),
+    crewSize: 4,
+    patrolRadius: 11,
+    patrolPoints: [
+      { x: m2w(-430), z: m2w(-352) },
+      { x: m2w(-455), z: m2w(-370) },
+      { x: m2w(-404), z: m2w(-370) },
+    ],
+  },
+  {
+    id: 'crew_d1_kalinin_north',
+    districtId: 'D1',
+    label: 'D1 Kalinin Nightlife North',
+    anchorX: m2w(-210),
+    anchorZ: m2w(-232),
+    crewSize: 3,
+    patrolRadius: 10,
+    patrolPoints: [
+      { x: m2w(-210), z: m2w(-232) },
+      { x: m2w(-232), z: m2w(-250) },
+      { x: m2w(-188), z: m2w(-250) },
+    ],
+  },
+];
 
 // =========================================================================
 // SPEC 5: METRO PLATFORM DOOR QUEUE LANES & CROSSWALK CLEARANCE BOUNDS

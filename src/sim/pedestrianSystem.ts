@@ -2,6 +2,10 @@ import * as THREE from 'three';
 import {
   BUS_STOPS,
   CollisionWorld,
+  GANG_TERRITORIES,
+  getDistrictAt,
+  getRoadElevationAt,
+  getTerrainHeight,
   METRO_DOOR_QUEUE_LANES,
   mulberry32,
   ROADS,
@@ -15,6 +19,13 @@ import {
   applyClothWindShader,
   getSharedHumanGeometries,
 } from './humanCharacter';
+import {
+  createSharedWeaponMesh,
+  fireSharedWeapon,
+  SHARED_WEAPON_SPEC,
+  SharedWeaponFxPool,
+} from './sharedWeapon';
+import { worldEventBus } from './worldEventBus';
 
 const PED_CAPSULE_RADIUS = 0.34;
 const PED_MIN_SEP = PED_CAPSULE_RADIUS * 2; // 0.68 m hard capsule separation
@@ -87,6 +98,41 @@ export interface PedAgent {
   busStopIdx: number;
   metroStationIdx: number;
   stationYaw: number;
+  // Gang & reaction state
+  hp: number;
+  alive: boolean;
+  respawnTimer: number;
+  fleeTimer: number;
+  fleeDirX: number;
+  fleeDirZ: number;
+  crewIdx: number;
+  memberSlot: number;
+  formOffX: number;
+  formOffZ: number;
+  suspicion: number; // 0..1
+  alertBannerTimer: number;
+  burstCooldown: number;
+  burstShotsLeft: number;
+  burstShotTimer: number;
+  aiming: boolean;
+}
+
+export interface PedPlayerContext {
+  pos: THREE.Vector3;
+  inVehicle: boolean;
+  speedKmh: number;
+  onPlayerHit?: (damage: number) => void;
+  onGunshotSound?: (distM: number) => void;
+}
+
+export interface GangCrewDebugInfo {
+  id: string;
+  districtId: string;
+  state: 'patrol' | 'alert' | 'search' | 'returning';
+  anchorX: number;
+  anchorZ: number;
+  maxSuspicion: number;
+  memberCount: number;
 }
 
 export interface PedestrianSystemHandles {
@@ -98,11 +144,15 @@ export interface PedestrianSystemHandles {
     elapsed: number,
     busStopArrivals?: boolean[],
     metroTrainFlags?: boolean[],
-    playerPos?: THREE.Vector3
+    playerPosOrCtx?: THREE.Vector3 | PedPlayerContext
   ) => void;
   reseed: (newSeed?: number) => void;
   getRayTargets: (origin: THREE.Vector3, radiusM: number) => FpsRayTarget[];
   getActiveSubtitle: (x: number, y: number, z: number) => string;
+  applyDamageToAgent: (agentId: string, damage: number, attackerPos?: THREE.Vector3) => boolean;
+  notifyPlayerGunshot: (x: number, y: number, z: number) => void;
+  getHiddenHeat: () => number;
+  getGangCrewStates: () => GangCrewDebugInfo[];
 }
 
 type CivilianClass =
@@ -113,9 +163,10 @@ type CivilianClass =
   | 'elder'
   | 'nightlife_patron'
   | 'student_runner'
-  | 'transit_guard';
+  | 'transit_guard'
+  | 'gang_member';
 
-type PedRole = 'sidewalk' | 'crosswalk' | 'bus_wait' | 'metro_plat' | 'metro_street';
+type PedRole = 'sidewalk' | 'crosswalk' | 'bus_wait' | 'metro_plat' | 'metro_street' | 'gang';
 
 interface OutfitPalette {
   jacket: string[];
@@ -209,6 +260,17 @@ const CLASS_OUTFITS: Record<CivilianClass, OutfitPalette> = {
     heightRange: [0.99, 1.08],
     buildScale: 1.07,
   },
+  // 2059 Russia darker tactical trench & street cyber-coat silhouette
+  gang_member: {
+    jacket: ['#14171e', '#1e1418', '#171c22', '#21191d'],
+    pants: ['#0e1015', '#15141a', '#12161c'],
+    boots: ['#090a0d', '#181414'],
+    hat: ['#101218', '#2a1218', '#1a1c22'],
+    prop: ['#12141a'],
+    hasPropChance: 0,
+    heightRange: [0.98, 1.08],
+    buildScale: 1.08,
+  },
 };
 
 const SKIN_TONES = ['#e2bea6', '#d2a98e', '#be9174', '#eccab4', '#9e7256', '#d6ae94'];
@@ -233,6 +295,8 @@ interface SidewalkSegment {
   len: number;
   dirX: number;
   dirZ: number;
+  nextEnd: { segIdx: number; dir: 1 | -1 }[];
+  nextStart: { segIdx: number; dir: 1 | -1 }[];
 }
 
 function buildSidewalkSegments(): SidewalkSegment[] {
@@ -242,8 +306,8 @@ function buildSidewalkSegments(): SidewalkSegment[] {
     if (road.kind === 'ramp' || road.kind === 'bridge') continue;
     const pts = road.points;
     if (pts.length < 2) continue;
-    // Place sidewalk neatly outside the road asphalt edge (road.width * 0.5 + 1.9m)
-    const offset = road.width * 0.5 + 2.05;
+    // Place sidewalk neatly on the raised concrete sidewalk centerline (road.width * 0.5 + 1.68m)
+    const offset = road.width * 0.5 + 1.68;
     for (let i = 0; i < pts.length - 1; i++) {
       const a = pts[i];
       const b = pts[i + 1];
@@ -264,12 +328,132 @@ function buildSidewalkSegments(): SidewalkSegment[] {
         const sz1 = b.z - dirZ * inset + nz * offset * side;
         const slen = Math.hypot(sx1 - sx0, sz1 - sz0);
         if (slen > 10) {
-          segs.push({ x0: sx0, z0: sz0, x1: sx1, z1: sz1, len: slen, dirX, dirZ });
+          segs.push({
+            x0: sx0,
+            z0: sz0,
+            x1: sx1,
+            z1: sz1,
+            len: slen,
+            dirX,
+            dirZ,
+            nextEnd: [],
+            nextStart: [],
+          });
         }
       }
     }
   }
+
+  // Build sidewalk corner & continuing connectivity graph so walkers transition seamlessly across blocks
+  const linkRadius = 24;
+  for (let i = 0; i < segs.length; i++) {
+    const a = segs[i];
+    for (let j = 0; j < segs.length; j++) {
+      if (i === j) continue;
+      const b = segs[j];
+      if (Math.hypot(b.x0 - a.x1, b.z0 - a.z1) < linkRadius) a.nextEnd.push({ segIdx: j, dir: 1 });
+      if (Math.hypot(b.x1 - a.x1, b.z1 - a.z1) < linkRadius) a.nextEnd.push({ segIdx: j, dir: -1 });
+      if (Math.hypot(b.x0 - a.x0, b.z0 - a.z0) < linkRadius) a.nextStart.push({ segIdx: j, dir: 1 });
+      if (Math.hypot(b.x1 - a.x0, b.z1 - a.z0) < linkRadius) a.nextStart.push({ segIdx: j, dir: -1 });
+    }
+  }
   return segs;
+}
+
+interface GangCrewRuntime {
+  id: string;
+  districtId: 'D1' | 'D8';
+  anchorX: number;
+  anchorZ: number;
+  homeAnchorX: number;
+  homeAnchorZ: number;
+  patrolPoints: { x: number; z: number }[];
+  patrolIdx: number;
+  patrolHoldTimer: number;
+  state: 'patrol' | 'alert' | 'search' | 'returning';
+  lastSeenX: number;
+  lastSeenZ: number;
+  searchTimer: number;
+  escapeTimer: number;
+  memberIndices: number[];
+}
+
+let _qMarkTextures: THREE.CanvasTexture[] | null = null;
+let _alertBangTexture: THREE.CanvasTexture | null = null;
+
+function getSuspicionTextures(): {
+  questionSteps: THREE.CanvasTexture[];
+  alertBang: THREE.CanvasTexture;
+} {
+  if (_qMarkTextures && _alertBangTexture) {
+    return { questionSteps: _qMarkTextures, alertBang: _alertBangTexture };
+  }
+
+  const steps: THREE.CanvasTexture[] = [];
+  const STEPS = 16;
+  for (let s = 0; s <= STEPS; s++) {
+    const frac = s / STEPS;
+    const c = document.createElement('canvas');
+    c.width = 96;
+    c.height = 96;
+    const ctx = c.getContext('2d')!;
+    ctx.clearRect(0, 0, 96, 96);
+
+    // Subtle dark backing pill
+    ctx.fillStyle = 'rgba(8, 12, 18, 0.72)';
+    ctx.beginPath();
+    ctx.arc(48, 48, 36, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = frac > 0.7 ? '#f97316' : '#cbd5e1';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // Base un-filled '?'
+    ctx.font = 'bold 54px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.32)';
+    ctx.fillText('?', 48, 50);
+
+    // Bottom-to-top filling '?'
+    if (frac > 0.01) {
+      const topY = 80 - frac * 64;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, topY, 96, 96 - topY);
+      ctx.clip();
+      ctx.fillStyle = frac > 0.75 ? '#ef4444' : frac > 0.4 ? '#f59e0b' : '#fde047';
+      ctx.fillText('?', 48, 50);
+      ctx.restore();
+    }
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    steps.push(tex);
+  }
+
+  const ac = document.createElement('canvas');
+  ac.width = 96;
+  ac.height = 96;
+  const actx = ac.getContext('2d')!;
+  actx.fillStyle = 'rgba(127, 29, 29, 0.9)';
+  actx.beginPath();
+  actx.arc(48, 48, 36, 0, Math.PI * 2);
+  actx.fill();
+  actx.strokeStyle = '#fca5a5';
+  actx.lineWidth = 4;
+  actx.stroke();
+  actx.font = 'bold 56px sans-serif';
+  actx.textAlign = 'center';
+  actx.textBaseline = 'middle';
+  actx.fillStyle = '#fef2f2';
+  actx.fillText('!', 48, 50);
+  const aTex = new THREE.CanvasTexture(ac);
+  aTex.colorSpace = THREE.SRGBColorSpace;
+
+  _qMarkTextures = steps;
+  _alertBangTexture = aTex;
+  return { questionSteps: steps, alertBang: aTex };
 }
 
 export function buildPedestrianSystem(
@@ -285,6 +469,16 @@ export function buildPedestrianSystem(
   const pick = <T,>(arr: T[]): T => arr[Math.floor(rng() * arr.length)];
 
   const agents: PedAgent[] = [];
+  const crews: GangCrewRuntime[] = [];
+  let hiddenHeat = 0; // 0..100 GTA-style hidden heat (NO HUD element!)
+
+  const weaponFxPool = new SharedWeaponFxPool(24);
+  root.add(weaponFxPool.root);
+  const { questionSteps, alertBang } = getSuspicionTextures();
+  const gangVisuals = new Map<
+    number,
+    { weapon: THREE.Group; suspicionSprite: THREE.Sprite }
+  >();
 
   const spawnAgents = () => {
     agents.length = 0;
@@ -297,8 +491,9 @@ export function buildPedestrianSystem(
         civClass === 'executive' ||
         civClass === 'elder' ||
         civClass === 'commuter' ||
-        civClass === 'transit_guard';
-      const isRude = civClass !== 'transit_guard' && rng() < 0.15;
+        civClass === 'transit_guard' ||
+        civClass === 'gang_member';
+      const isRude = civClass !== 'transit_guard' && civClass !== 'gang_member' && rng() < 0.15;
       return {
         id: `ped_${nextId++}`,
         role,
@@ -326,16 +521,29 @@ export function buildPedestrianSystem(
         targetX: 0,
         targetZ: 0,
         heading: rng() * Math.PI * 2,
-        speed: civClass === 'elder' ? 0.92 : civClass === 'student_runner' ? 1.85 : 1.25 + rng() * 0.48,
+        speed:
+          civClass === 'elder'
+            ? 0.92
+            : civClass === 'student_runner'
+            ? 1.85
+            : civClass === 'gang_member'
+            ? 1.45 + rng() * 0.25
+            : 1.25 + rng() * 0.48,
         stridePhase: rng() * Math.PI * 2,
         idlePhase: rng() * Math.PI * 2,
         heightScale: hMin + rng() * (hMax - hMin),
         buildScale: pal.buildScale * (0.94 + rng() * 0.12),
         hasProp: rng() < pal.hasPropChance,
-        hasScarf: civClass !== 'transit_guard' && rng() < 0.56,
+        hasScarf:
+          civClass === 'gang_member'
+            ? rng() < 0.72
+            : civClass !== 'transit_guard' && rng() < 0.56,
         coatLenScale: isLongCoatClass ? 0.86 + rng() * 0.24 : 0.52 + rng() * 0.24,
         hairFlowScale: 0.85 + rng() * 0.45,
-        usesCap: civClass === 'transit_guard' || (civClass === 'working_class' && rng() < 0.42),
+        usesCap:
+          civClass === 'transit_guard' ||
+          (civClass === 'gang_member' && rng() < 0.62) ||
+          (civClass === 'working_class' && rng() < 0.42),
         segIdx: 0,
         segProgress: 0,
         segDir: rng() > 0.5 ? 1 : -1,
@@ -350,11 +558,27 @@ export function buildPedestrianSystem(
         busStopIdx: -1,
         metroStationIdx: -1,
         stationYaw: 0,
+        hp: civClass === 'gang_member' ? 100 : 50,
+        alive: true,
+        respawnTimer: 0,
+        fleeTimer: 0,
+        fleeDirX: 0,
+        fleeDirZ: 0,
+        crewIdx: -1,
+        memberSlot: 0,
+        formOffX: 0,
+        formOffZ: 0,
+        suspicion: 0,
+        alertBannerTimer: 0,
+        burstCooldown: 0.35 + rng() * 0.65,
+        burstShotsLeft: 0,
+        burstShotTimer: 0,
+        aiming: false,
       };
     };
 
-    // 1. SIDEWALK WALKERS (140 civilians walking streets across all districts)
-    const sidewalkCount = 140;
+    // 1. SIDEWALK WALKERS (104 civilians + 20 gang crew members = exact 314 existing cap!)
+    const sidewalkCount = 104;
     for (let i = 0; i < sidewalkCount; i++) {
       const civClass = ALL_CLASSES[i % ALL_CLASSES.length];
       const ag = makeBaseAgent('sidewalk', civClass);
@@ -481,6 +705,73 @@ export function buildPedestrianSystem(
         agents.push(ag);
       }
     }
+
+    // 5. 2059 RUSSIA GANG CREWS (Crews of 3-5 in D8 Black Market Quay & D1 Nightlife)
+    crews.length = 0;
+    gangVisuals.forEach((v) => {
+      root.remove(v.weapon);
+      root.remove(v.suspicionSprite);
+    });
+    gangVisuals.clear();
+
+    for (let cIdx = 0; cIdx < GANG_TERRITORIES.length; cIdx++) {
+      const terr = GANG_TERRITORIES[cIdx];
+      const memberIndices: number[] = [];
+      for (let m = 0; m < terr.crewSize; m++) {
+        const ag = makeBaseAgent('gang', 'gang_member');
+        const angle = (m / terr.crewSize) * Math.PI * 2 + 0.4;
+        const rad = 2.0 + (m % 2) * 1.4;
+        ag.crewIdx = cIdx;
+        ag.memberSlot = m;
+        ag.formOffX = Math.cos(angle) * rad;
+        ag.formOffZ = Math.sin(angle) * rad;
+        ag.x = terr.anchorX + ag.formOffX;
+        ag.z = terr.anchorZ + ag.formOffZ;
+        const groundY = Math.max(0.08, getTerrainHeight(ag.x, ag.z));
+        ag.y = terr.districtId === 'D8' && ag.x > 1560 ? Math.max(groundY, 1.52) : groundY;
+        ag.baseX = ag.x;
+        ag.baseZ = ag.z;
+        ag.prevX = ag.x;
+        ag.prevZ = ag.z;
+        ag.heading = angle + Math.PI * 0.5;
+        const idx = agents.length;
+        agents.push(ag);
+        memberIndices.push(idx);
+
+        // Shared weapon in hand + filling "?" suspicion sprite above head
+        const weapon = createSharedWeaponMesh(0.95);
+        root.add(weapon);
+        const spriteMat = new THREE.SpriteMaterial({
+          map: questionSteps[0],
+          transparent: true,
+          depthTest: false,
+          depthWrite: false,
+        });
+        const suspicionSprite = new THREE.Sprite(spriteMat);
+        suspicionSprite.scale.set(0.62, 0.62, 1);
+        suspicionSprite.visible = false;
+        suspicionSprite.renderOrder = 10;
+        root.add(suspicionSprite);
+        gangVisuals.set(idx, { weapon, suspicionSprite });
+      }
+      crews.push({
+        id: terr.id,
+        districtId: terr.districtId,
+        anchorX: terr.anchorX,
+        anchorZ: terr.anchorZ,
+        homeAnchorX: terr.anchorX,
+        homeAnchorZ: terr.anchorZ,
+        patrolPoints: terr.patrolPoints,
+        patrolIdx: 0,
+        patrolHoldTimer: 1.5,
+        state: 'patrol',
+        lastSeenX: terr.anchorX,
+        lastSeenZ: terr.anchorZ,
+        searchTimer: 0,
+        escapeTimer: 0,
+        memberIndices,
+      });
+    }
   };
 
   spawnAgents();
@@ -511,33 +802,33 @@ export function buildPedestrianSystem(
   applyClothWindShader(clothMat, outdoorWindUniform, 'cloth-wind-inst-v3');
 
   const coatSkirtMat = new THREE.MeshStandardMaterial({
-    map: textures.pedClothingMap,
-    roughnessMap: textures.pedClothingRoughness,
-    bumpMap: textures.pedClothingBump,
-    bumpScale: 0.036,
-    roughness: 0.92,
+    map: textures.pedFabricKnitMap,
+    roughnessMap: textures.pedFabricKnitRoughness,
+    bumpMap: textures.pedFabricKnitBump,
+    bumpScale: 0.042,
+    roughness: 0.94,
     metalness: 0.02,
     side: THREE.DoubleSide,
   });
   applyClothWindShader(coatSkirtMat, outdoorWindUniform, 'cloth-wind-inst-v3');
 
   const pantsMat = new THREE.MeshStandardMaterial({
-    map: textures.pedClothingMap,
-    roughnessMap: textures.pedClothingRoughness,
-    bumpMap: textures.pedClothingBump,
-    bumpScale: 0.028,
-    roughness: 0.94,
+    map: textures.pedFabricDenimMap,
+    roughnessMap: textures.pedFabricDenimRoughness,
+    bumpMap: textures.pedFabricDenimBump,
+    bumpScale: 0.034,
+    roughness: 0.92,
     metalness: 0.02,
     side: THREE.DoubleSide,
   });
   applyClothWindShader(pantsMat, outdoorWindUniform, 'cloth-wind-inst-v3');
 
   const scarfMat = new THREE.MeshStandardMaterial({
-    map: textures.pedClothingMap,
-    roughnessMap: textures.pedClothingRoughness,
-    bumpMap: textures.pedClothingBump,
-    bumpScale: 0.038,
-    roughness: 0.96,
+    map: textures.pedFabricKnitMap,
+    roughnessMap: textures.pedFabricKnitRoughness,
+    bumpMap: textures.pedFabricKnitBump,
+    bumpScale: 0.044,
+    roughness: 0.97,
     metalness: 0.0,
     side: THREE.DoubleSide,
   });
@@ -554,14 +845,18 @@ export function buildPedestrianSystem(
   applyClothWindShader(hairMat, outdoorWindUniform, 'cloth-wind-inst-v3');
 
   const bootMat = new THREE.MeshStandardMaterial({
-    roughness: 0.46,
-    metalness: 0.14,
+    map: textures.pedFabricLeatherMap,
+    roughnessMap: textures.pedFabricLeatherRoughness,
+    bumpMap: textures.pedFabricLeatherBump,
+    bumpScale: 0.018,
+    roughness: 0.36,
+    metalness: 0.16,
   });
   const faceMat = new THREE.MeshStandardMaterial({
-    map: textures.pedFaceMap,
+    map: textures.pedFaceStreetCloseMap,
     bumpMap: textures.pedFaceBump,
-    bumpScale: 0.0062,
-    roughness: 0.48,
+    bumpScale: 0.0092,
+    roughness: 0.44,
     metalness: 0.02,
   });
   const skinMat = new THREE.MeshStandardMaterial({
@@ -769,6 +1064,7 @@ export function buildPedestrianSystem(
 
     for (let i = 0; i < totalCount; i++) {
       const a = agents[i];
+      if (!a.alive) continue;
       const agx = Math.floor(a.x * INV_CELL_SIZE);
       const agz = Math.floor(a.z * INV_CELL_SIZE);
 
@@ -778,7 +1074,7 @@ export function buildPedestrianSystem(
           while (j !== -1) {
             if (j > i) {
               const b = agents[j];
-              if (Math.abs(a.y - b.y) < 1.2) {
+              if (b.alive && Math.abs(a.y - b.y) < 1.2) {
                 let dx = b.x - a.x;
                 let dz = b.z - a.z;
                 let d2 = dx * dx + dz * dz;
@@ -907,14 +1203,340 @@ export function buildPedestrianSystem(
     }
   };
 
+  const _shotOrigin = new THREE.Vector3();
+  const _shotMuzzle = new THREE.Vector3();
+  const _shotDir = new THREE.Vector3();
+  const _playerHitBox = new THREE.Box3();
+  const _playerPosVec = new THREE.Vector3();
+
+  const alertCrew = (crewIdx: number, px: number, pz: number, propagate: boolean) => {
+    const crew = crews[crewIdx];
+    if (!crew) return;
+    const wasAlert = crew.state === 'alert';
+    crew.state = 'alert';
+    crew.lastSeenX = px;
+    crew.lastSeenZ = pz;
+    crew.escapeTimer = 0;
+    crew.searchTimer = 0;
+    for (let k = 0; k < crew.memberIndices.length; k++) {
+      const m = agents[crew.memberIndices[k]];
+      m.suspicion = 1;
+      if (!wasAlert) m.alertBannerTimer = 2.6;
+    }
+    if (!wasAlert) {
+      hiddenHeat = Math.min(100, hiddenHeat + 12);
+      const terr = GANG_TERRITORIES[crewIdx];
+      worldEventBus.emit({
+        type: 'crime',
+        kind: 'gang_firefight',
+        x: px,
+        y: 1,
+        z: pz,
+        districtId: terr?.districtId ?? 'D1',
+        severity: 0.65,
+      });
+    }
+    if (propagate) {
+      const earshotR = 48 + hiddenHeat * 0.45;
+      const earshotR2 = earshotR * earshotR;
+      for (let j = 0; j < crews.length; j++) {
+        if (j === crewIdx) continue;
+        const other = crews[j];
+        const dx = other.anchorX - crew.anchorX;
+        const dz = other.anchorZ - crew.anchorZ;
+        if (dx * dx + dz * dz <= earshotR2) {
+          alertCrew(j, px, pz, false);
+        }
+      }
+    }
+  };
+
+  const applyDamageToAgent = (
+    agentId: string,
+    damage: number,
+    attackerPos?: THREE.Vector3
+  ): boolean => {
+    for (let i = 0; i < totalCount; i++) {
+      const ag = agents[i];
+      if (ag.id !== agentId || !ag.alive) continue;
+      ag.hp -= damage;
+      if (ag.role === 'gang' && attackerPos) {
+        alertCrew(ag.crewIdx, attackerPos.x, attackerPos.z, true);
+        hiddenHeat = Math.min(100, hiddenHeat + 16);
+      } else if (ag.role !== 'gang') {
+        hiddenHeat = Math.min(100, hiddenHeat + 20);
+        if (attackerPos) {
+          const fdx = ag.x - attackerPos.x;
+          const fdz = ag.z - attackerPos.z;
+          const fl = Math.max(0.01, Math.hypot(fdx, fdz));
+          ag.fleeDirX = fdx / fl;
+          ag.fleeDirZ = fdz / fl;
+          ag.fleeTimer = 8.0;
+        }
+      }
+      if (ag.hp <= 0) {
+        ag.hp = 0;
+        ag.alive = false;
+        ag.respawnTimer = 24.0;
+        if (ag.role === 'gang') {
+          hiddenHeat = Math.min(100, hiddenHeat + 14);
+        } else {
+          hiddenHeat = Math.min(100, hiddenHeat + 24);
+        }
+      }
+      return true;
+    }
+    return false;
+  };
+
+  const notifyPlayerGunshot = (x: number, y: number, z: number) => {
+    let witnesses = 0;
+    for (let i = 0; i < totalCount; i++) {
+      const ag = agents[i];
+      if (!ag.alive) continue;
+      const dx = ag.x - x;
+      const dz = ag.z - z;
+      const d2 = dx * dx + dz * dz;
+      if (ag.role !== 'gang' && d2 < 42 * 42) {
+        witnesses++;
+      }
+      if (ag.role === 'gang' && d2 < 52 * 52) {
+        alertCrew(ag.crewIdx, x, z, true);
+      }
+    }
+    hiddenHeat = Math.min(100, hiddenHeat + 4 + Math.min(14, witnesses * 3));
+    void y;
+  };
+
   const update = (
     dt: number,
     elapsed: number,
     busStopArrivals?: boolean[],
     metroTrainFlags?: boolean[],
-    playerPos?: THREE.Vector3
+    playerPosOrCtx?: THREE.Vector3 | PedPlayerContext
   ) => {
     const safeDt = Math.min(0.05, Math.max(0.0005, dt));
+    weaponFxPool.update(safeDt);
+
+    const playerCtx: PedPlayerContext | undefined =
+      playerPosOrCtx instanceof THREE.Vector3
+        ? { pos: playerPosOrCtx, inVehicle: false, speedKmh: 0 }
+        : playerPosOrCtx;
+    const playerPos = playerCtx?.pos;
+    if (playerPos) {
+      _playerPosVec.copy(playerPos);
+      _playerHitBox.set(
+        new THREE.Vector3(playerPos.x - 0.55, playerPos.y, playerPos.z - 0.55),
+        new THREE.Vector3(playerPos.x + 0.55, playerPos.y + 1.75, playerPos.z + 0.55)
+      );
+    }
+
+    // Drain world event bus -> civilians flee gunfire & scatter from chases (gang members never flee!)
+    const events = worldEventBus.drainQueued();
+    for (let e = 0; e < events.length; e++) {
+      const ev = events[e];
+      if (ev.type === 'gunfire') {
+        const r2 = ev.loudRadius * ev.loudRadius;
+        for (let i = 0; i < totalCount; i++) {
+          const ag = agents[i];
+          if (!ag.alive || ag.role === 'gang' || ag.role === 'metro_plat') continue;
+          const dx = ag.x - ev.x;
+          const dz = ag.z - ev.z;
+          const d2 = dx * dx + dz * dz;
+          if (d2 < r2) {
+            const d = Math.max(0.1, Math.sqrt(d2));
+            ag.fleeDirX = dx / d;
+            ag.fleeDirZ = dz / d;
+            ag.fleeTimer = 6.5 + (i % 4) * 0.6;
+          }
+        }
+        if (ev.shooterKind === 'player') {
+          notifyPlayerGunshot(ev.x, ev.y, ev.z);
+        }
+      } else if (ev.type === 'chase') {
+        const r2 = ev.radius * ev.radius;
+        for (let i = 0; i < totalCount; i++) {
+          const ag = agents[i];
+          if (!ag.alive || ag.role === 'gang' || ag.role === 'metro_plat') continue;
+          const dx = ag.x - ev.x;
+          const dz = ag.z - ev.z;
+          const d2 = dx * dx + dz * dz;
+          if (d2 < r2) {
+            const d = Math.max(0.1, Math.sqrt(d2));
+            // Scatter perpendicularly / away from chase vector
+            const perpX = -ev.dirZ;
+            const perpZ = ev.dirX;
+            const side = dx * perpX + dz * perpZ >= 0 ? 1 : -1;
+            const sx = (dx / d) * 0.5 + perpX * side * 0.85;
+            const sz = (dz / d) * 0.5 + perpZ * side * 0.85;
+            const sl = Math.max(0.01, Math.hypot(sx, sz));
+            ag.fleeDirX = sx / sl;
+            ag.fleeDirZ = sz / sl;
+            ag.fleeTimer = Math.max(ag.fleeTimer, 3.6);
+          }
+        }
+      }
+    }
+
+    // Update Gang Crews (territory patrol, suspicion 0->1 detection, alert/chase, search, return)
+    let anyCrewAlert = false;
+    for (let c = 0; c < crews.length; c++) {
+      const crew = crews[c];
+      let aliveCount = 0;
+      let anySawPlayer = false;
+      let minDistToPlayer = Infinity;
+
+      for (let mIdx = 0; mIdx < crew.memberIndices.length; mIdx++) {
+        const ag = agents[crew.memberIndices[mIdx]];
+        if (!ag.alive) {
+          ag.respawnTimer -= safeDt;
+          if (ag.respawnTimer <= 0) {
+            ag.alive = true;
+            ag.hp = 100;
+            ag.x = crew.homeAnchorX + ag.formOffX;
+            ag.z = crew.homeAnchorZ + ag.formOffZ;
+            ag.suspicion = 0;
+            ag.alertBannerTimer = 0;
+          }
+          continue;
+        }
+        aliveCount++;
+        ag.alertBannerTimer = Math.max(0, ag.alertBannerTimer - safeDt);
+
+        if (playerPos) {
+          const toPx = playerPos.x - ag.x;
+          const toPz = playerPos.z - ag.z;
+          const dist = Math.hypot(toPx, toPz);
+          if (dist < minDistToPlayer) minDistToPlayer = dist;
+
+          const detectRange = (crew.state === 'alert' ? 38 : 27) + hiddenHeat * 0.16;
+          const fwdX = Math.sin(ag.heading);
+          const fwdZ = Math.cos(ag.heading);
+          const dot = dist > 0.05 ? (toPx * fwdX + toPz * fwdZ) / dist : 1;
+          const inCone = dot >= 0.42 || dist < 5.5 || crew.state === 'alert';
+          const hasLos =
+            dist <= detectRange &&
+            inCone &&
+            (!collisionWorld || collisionWorld.hasLineOfSight(ag.x, ag.z, playerPos.x, playerPos.z));
+
+          if (hasLos) {
+            anySawPlayer = true;
+            crew.lastSeenX = playerPos.x;
+            crew.lastSeenZ = playerPos.z;
+            if (crew.state !== 'alert') {
+              const proxFactor = Math.max(0.22, 1.35 - dist / detectRange);
+              const heatBoost = 1 + hiddenHeat * 0.012;
+              const vehScale = playerCtx?.inVehicle && (playerCtx.speedKmh ?? 0) > 25 ? 0.65 : 1.0;
+              ag.suspicion = Math.min(1, ag.suspicion + safeDt * proxFactor * heatBoost * vehScale * 0.95);
+              if (ag.suspicion >= 1) {
+                alertCrew(c, playerPos.x, playerPos.z, true);
+              }
+            }
+          } else if (crew.state !== 'alert') {
+            ag.suspicion = Math.max(0, ag.suspicion - safeDt * 0.28);
+          }
+        } else if (crew.state !== 'alert') {
+          ag.suspicion = Math.max(0, ag.suspicion - safeDt * 0.28);
+        }
+      }
+
+      if (crew.state === 'patrol') {
+        const wp = crew.patrolPoints[crew.patrolIdx];
+        const dx = wp.x - crew.anchorX;
+        const dz = wp.z - crew.anchorZ;
+        const d = Math.hypot(dx, dz);
+        if (d < 1.2) {
+          crew.patrolHoldTimer -= safeDt;
+          if (crew.patrolHoldTimer <= 0) {
+            crew.patrolIdx = (crew.patrolIdx + 1) % crew.patrolPoints.length;
+            crew.patrolHoldTimer = 2.4;
+          }
+        } else {
+          const step = Math.min(d, 1.35 * safeDt);
+          crew.anchorX += (dx / d) * step;
+          crew.anchorZ += (dz / d) * step;
+        }
+      } else if (crew.state === 'alert') {
+        anyCrewAlert = true;
+        if (playerPos) {
+          // Move anchor toward player/lastSeen while chasing
+          const tx = anySawPlayer ? playerPos.x : crew.lastSeenX;
+          const tz = anySawPlayer ? playerPos.z : crew.lastSeenZ;
+          const dx = tx - crew.anchorX;
+          const dz = tz - crew.anchorZ;
+          const d = Math.hypot(dx, dz);
+          if (d > 2.5) {
+            const chaseSpd = 5.4 + hiddenHeat * 0.012;
+            const step = Math.min(d, chaseSpd * safeDt);
+            crew.anchorX += (dx / d) * step;
+            crew.anchorZ += (dz / d) * step;
+          }
+          if (Math.floor(elapsed * 3) !== Math.floor((elapsed - safeDt) * 3) && d > 0.1) {
+            worldEventBus.emit({
+              type: 'chase',
+              x: crew.anchorX,
+              y: 1,
+              z: crew.anchorZ,
+              dirX: dx / Math.max(0.1, d),
+              dirZ: dz / Math.max(0.1, d),
+              radius: 14,
+              kind: 'gang',
+            });
+          }
+
+          const escapeDist = 42 + hiddenHeat * 0.28;
+          const escapeDuration = 4.5 + hiddenHeat * 0.06;
+          if (!anySawPlayer && minDistToPlayer > escapeDist) {
+            crew.escapeTimer += safeDt;
+            if (crew.escapeTimer >= escapeDuration) {
+              crew.state = 'search';
+              crew.searchTimer = 6.5 + hiddenHeat * 0.05;
+              crew.escapeTimer = 0;
+            }
+          } else {
+            crew.escapeTimer = 0;
+          }
+        } else {
+          crew.state = 'search';
+          crew.searchTimer = 5.5;
+        }
+      } else if (crew.state === 'search') {
+        const dx = crew.lastSeenX - crew.anchorX;
+        const dz = crew.lastSeenZ - crew.anchorZ;
+        const d = Math.hypot(dx, dz);
+        if (d > 1.5) {
+          const step = Math.min(d, 3.2 * safeDt);
+          crew.anchorX += (dx / d) * step;
+          crew.anchorZ += (dz / d) * step;
+        } else {
+          crew.searchTimer -= safeDt;
+          if (crew.searchTimer <= 0) {
+            crew.state = 'returning';
+          }
+        }
+      } else if (crew.state === 'returning') {
+        const dx = crew.homeAnchorX - crew.anchorX;
+        const dz = crew.homeAnchorZ - crew.anchorZ;
+        const d = Math.hypot(dx, dz);
+        if (d < 1.5) {
+          crew.anchorX = crew.homeAnchorX;
+          crew.anchorZ = crew.homeAnchorZ;
+          crew.state = 'patrol';
+        } else {
+          const step = Math.min(d, 2.4 * safeDt);
+          crew.anchorX += (dx / d) * step;
+          crew.anchorZ += (dz / d) * step;
+        }
+      }
+
+      if (aliveCount === 0) {
+        crew.state = 'returning';
+      }
+    }
+
+    if (!anyCrewAlert && hiddenHeat > 0) {
+      hiddenHeat = Math.max(0, hiddenHeat - safeDt * 2.2);
+    }
 
     for (let i = 0; i < totalCount; i++) {
       const ag = agents[i];
@@ -926,6 +1548,19 @@ export function buildPedestrianSystem(
       ag.nodTimer = Math.max(0, ag.nodTimer - safeDt);
       ag.nodCooldown = Math.max(0, ag.nodCooldown - safeDt);
       ag.targetSidestep = 0;
+      ag.aiming = false;
+
+      if (!ag.alive) {
+        if (ag.role !== 'gang') {
+          ag.respawnTimer -= safeDt;
+          if (ag.respawnTimer <= 0) {
+            ag.alive = true;
+            ag.hp = 50;
+          }
+        }
+        walkingFlags[i] = 0;
+        continue;
+      }
 
       // Apply & decay bump impulse smoothly
       if (Math.abs(ag.impulseX) > 0.0005 || Math.abs(ag.impulseZ) > 0.0005) {
@@ -938,23 +1573,257 @@ export function buildPedestrianSystem(
 
       let isWalking = false;
 
-      if (ag.role === 'sidewalk') {
+      // Non-gang civilians flee/scatter when triggered by worldEventBus
+      if (ag.fleeTimer > 0 && ag.role !== 'gang') {
+        ag.fleeTimer = Math.max(0, ag.fleeTimer - safeDt);
+        const fleeSpd = 4.8;
+        ag.x += ag.fleeDirX * fleeSpd * safeDt;
+        ag.z += ag.fleeDirZ * fleeSpd * safeDt;
+        ag.heading = Math.atan2(ag.fleeDirX, ag.fleeDirZ);
+        isWalking = true;
+      } else if (ag.role === 'gang') {
+        const crew = crews[ag.crewIdx];
+        if (crew) {
+          let targetX = crew.anchorX + ag.formOffX;
+          let targetZ = crew.anchorZ + ag.formOffZ;
+          let moveSpd = ag.speed;
+
+          if (crew.state === 'alert' && playerPos) {
+            // Converge loosely around the player / firing ring (7..14m)
+            const ringAng = (ag.memberSlot / Math.max(1, crew.memberIndices.length)) * Math.PI * 2;
+            const ringR = 7.5 + (ag.memberSlot % 2) * 3.0;
+            targetX = playerPos.x + Math.cos(ringAng) * ringR;
+            targetZ = playerPos.z + Math.sin(ringAng) * ringR;
+            moveSpd = 5.2 + hiddenHeat * 0.012;
+          } else if (crew.state === 'search') {
+            targetX = crew.lastSeenX + ag.formOffX * 1.6;
+            targetZ = crew.lastSeenZ + ag.formOffZ * 1.6;
+            moveSpd = 3.1;
+          }
+
+          const dx = targetX - ag.x;
+          const dz = targetZ - ag.z;
+          const dist = Math.hypot(dx, dz);
+
+          if (dist > 0.45) {
+            const step = Math.min(dist, moveSpd * safeDt);
+            ag.x += (dx / dist) * step;
+            ag.z += (dz / dist) * step;
+            ag.heading = Math.atan2(dx, dz);
+            isWalking = true;
+          }
+
+          const groundY = Math.max(0.08, getTerrainHeight(ag.x, ag.z));
+          ag.y = crew.districtId === 'D8' && ag.x > 1560 ? Math.max(groundY, 1.52) : groundY;
+
+          // Face player & fire shared weapon during alert chase!
+          if (crew.state === 'alert' && playerPos) {
+            const toPx = playerPos.x - ag.x;
+            const toPz = playerPos.z - ag.z;
+            const pDist = Math.hypot(toPx, toPz);
+            const hasLos =
+              pDist < 32 &&
+              (!collisionWorld || collisionWorld.hasLineOfSight(ag.x, ag.z, playerPos.x, playerPos.z));
+            if (hasLos) {
+              ag.heading = Math.atan2(toPx, toPz);
+              ag.aiming = true;
+
+              if (ag.burstShotsLeft > 0) {
+                ag.burstShotTimer -= safeDt;
+                if (ag.burstShotTimer <= 0) {
+                  ag.burstShotsLeft--;
+                  ag.burstShotTimer = 1 / SHARED_WEAPON_SPEC.fireRateHz;
+
+                  const eyeY = ag.y + 1.44 * ag.heightScale;
+                  _shotOrigin.set(ag.x, eyeY, ag.z);
+                  const sinH = Math.sin(ag.heading);
+                  const cosH = Math.cos(ag.heading);
+                  _shotMuzzle.set(
+                    ag.x + sinH * 0.72 - cosH * 0.18,
+                    ag.y + 1.38 * ag.heightScale,
+                    ag.z + cosH * 0.72 + sinH * 0.18
+                  );
+                  _shotDir.set(
+                    playerPos.x - ag.x,
+                    playerPos.y + 1.15 - eyeY,
+                    playerPos.z - ag.z
+                  );
+
+                  const hit = fireSharedWeapon({
+                    origin: _shotOrigin,
+                    muzzleWorld: _shotMuzzle,
+                    dir: _shotDir,
+                    shooterKind: 'gang',
+                    shooterId: ag.id,
+                    spreadRad: SHARED_WEAPON_SPEC.npcSpreadRad,
+                    rayTargets: [],
+                    collisionWorld,
+                    playerHitBox: _playerHitBox,
+                    fxPool: weaponFxPool,
+                    districtId: crew.districtId,
+                    onSound: playerCtx?.onGunshotSound,
+                    listenerPos: _playerPosVec,
+                  });
+                  if (hit.hit && hit.kind === 'player' && playerCtx?.onPlayerHit) {
+                    playerCtx.onPlayerHit(playerCtx.inVehicle ? hit.damage * 0.22 : hit.damage * 0.45);
+                  }
+                }
+              } else {
+                ag.burstCooldown -= safeDt;
+                if (ag.burstCooldown <= 0) {
+                  ag.burstShotsLeft = SHARED_WEAPON_SPEC.burstCount;
+                  ag.burstShotTimer = 0;
+                  ag.burstCooldown =
+                    Math.max(0.45, SHARED_WEAPON_SPEC.burstCooldownSec - hiddenHeat * 0.004) +
+                    (ag.memberSlot % 3) * 0.18;
+                }
+              }
+            }
+          } else if (ag.suspicion > 0.12 && playerPos) {
+            // Glance toward player while suspicious
+            ag.heading = Math.atan2(playerPos.x - ag.x, playerPos.z - ag.z);
+            ag.aiming = ag.suspicion > 0.65;
+          }
+        }
+      } else if (ag.role === 'sidewalk') {
         const seg = sidewalkSegs[ag.segIdx];
-        if (seg) {
+        if (ag.ixIdx >= 0) {
+          // Sidewalk walker stepping onto a nearby intersection zebra crosswalk
+          const ix = SIGNALIZED_INTERSECTIONS[ag.ixIdx];
+          if (ix) {
+            const sig = getIntersectionSignal(ix, elapsed);
+            const hasWalk = ag.crossAxis === 'ns' ? sig.pedCrossNS : sig.pedCrossEW;
+            if (ag.crossState === 'wait') {
+              ag.heading = Math.atan2(
+                ag.crossEndX - ag.crossStartX,
+                ag.crossEndZ - ag.crossStartZ
+              );
+              if (hasWalk) ag.crossState = 'crossing';
+            } else {
+              isWalking = true;
+              const totalDist = Math.hypot(
+                ag.crossEndX - ag.crossStartX,
+                ag.crossEndZ - ag.crossStartZ
+              );
+              const pace = hasWalk ? ag.speed * 1.2 : ag.speed * 1.7;
+              ag.crossU += (pace * safeDt) / Math.max(1, totalDist);
+              const targetX = ag.crossStartX + (ag.crossEndX - ag.crossStartX) * Math.min(1, ag.crossU);
+              const targetZ = ag.crossStartZ + (ag.crossEndZ - ag.crossStartZ) * Math.min(1, ag.crossU);
+              ag.x += (targetX - ag.x) * Math.min(1, safeDt * 7.5);
+              ag.z += (targetZ - ag.z) * Math.min(1, safeDt * 7.5);
+              const roadY = getRoadElevationAt(ag.x, ag.z);
+              ag.y = Math.max(0.095, roadY + 0.015);
+              ag.heading = Math.atan2(
+                ag.crossEndX - ag.crossStartX,
+                ag.crossEndZ - ag.crossStartZ
+              );
+              if (ag.crossU >= 1) {
+                ag.crossU = 0;
+                ag.crossState = 'wait';
+                ag.ixIdx = -1;
+                // Latch smoothly onto nearest far-side sidewalk segment
+                let bestIdx = ag.segIdx;
+                let bestD = Infinity;
+                let bestDir: 1 | -1 = 1;
+                let bestProg = 0;
+                for (let si = 0; si < sidewalkSegs.length; si++) {
+                  const cand = sidewalkSegs[si];
+                  const d0 = Math.hypot(cand.x0 - ag.x, cand.z0 - ag.z);
+                  const d1 = Math.hypot(cand.x1 - ag.x, cand.z1 - ag.z);
+                  if (d0 < bestD) {
+                    bestD = d0;
+                    bestIdx = si;
+                    bestDir = 1;
+                    bestProg = 0.5;
+                  }
+                  if (d1 < bestD) {
+                    bestD = d1;
+                    bestIdx = si;
+                    bestDir = -1;
+                    bestProg = cand.len - 0.5;
+                  }
+                }
+                ag.segIdx = bestIdx;
+                ag.segDir = bestDir;
+                ag.segProgress = bestProg;
+              }
+            }
+          } else {
+            ag.ixIdx = -1;
+          }
+        } else if (seg) {
           isWalking = true;
           ag.segProgress += ag.speed * ag.segDir * safeDt;
-          if (ag.segProgress >= seg.len) {
-            ag.segProgress = seg.len;
-            ag.segDir = -1;
-          } else if (ag.segProgress <= 0) {
-            ag.segProgress = 0;
-            ag.segDir = 1;
+          const hitEnd = ag.segProgress >= seg.len;
+          const hitStart = ag.segProgress <= 0;
+          let enteredCrosswalk = false;
+          if (hitEnd || hitStart) {
+            const endX = hitEnd ? seg.x1 : seg.x0;
+            const endZ = hitEnd ? seg.z1 : seg.z0;
+            // Check if arriving at a signalized crosswalk corner to cross cleanly!
+            for (let ixI = 0; ixI < SIGNALIZED_INTERSECTIONS.length; ixI++) {
+              const ix = SIGNALIZED_INTERSECTIONS[ixI];
+              if (Math.hypot(endX - ix.x, endZ - ix.z) < Math.max(ix.halfSpanNS, ix.halfSpanEW) + 12) {
+                const crossNS = Math.abs(seg.dirX) > Math.abs(seg.dirZ);
+                ag.ixIdx = ixI;
+                ag.crossAxis = crossNS ? 'ns' : 'ew';
+                ag.crossState = 'wait';
+                ag.crossU = 0;
+                if (crossNS) {
+                  const signZ = endZ >= ix.z ? 1 : -1;
+                  const startSignX = endX >= ix.x ? 1 : -1;
+                  const zLane = ix.z + signZ * (ix.halfSpanEW + 1.8);
+                  const xSpan = ix.halfSpanNS + 1.6;
+                  ag.crossStartX = ix.x + startSignX * xSpan;
+                  ag.crossStartZ = zLane;
+                  ag.crossEndX = ix.x - startSignX * xSpan;
+                  ag.crossEndZ = zLane;
+                } else {
+                  const signX = endX >= ix.x ? 1 : -1;
+                  const startSignZ = endZ >= ix.z ? 1 : -1;
+                  const xLane = ix.x + signX * (ix.halfSpanNS + 1.8);
+                  const zSpan = ix.halfSpanEW + 1.6;
+                  ag.crossStartX = xLane;
+                  ag.crossStartZ = ix.z + startSignZ * zSpan;
+                  ag.crossEndX = xLane;
+                  ag.crossEndZ = ix.z - startSignZ * zSpan;
+                }
+                enteredCrosswalk = true;
+                break;
+              }
+            }
+            if (!enteredCrosswalk) {
+              const links = hitEnd ? seg.nextEnd : seg.nextStart;
+              if (links.length > 0) {
+                const pick = links[(i + Math.floor(elapsed)) % links.length];
+                ag.segIdx = pick.segIdx;
+                ag.segDir = pick.dir;
+                const nextS = sidewalkSegs[pick.segIdx];
+                ag.segProgress = pick.dir === 1 ? 0.5 : Math.max(0, nextS.len - 0.5);
+              } else if (hitEnd) {
+                ag.segProgress = seg.len;
+                ag.segDir = -1;
+              } else {
+                ag.segProgress = 0;
+                ag.segDir = 1;
+              }
+            }
           }
-          const targetX = seg.x0 + seg.dirX * ag.segProgress;
-          const targetZ = seg.z0 + seg.dirZ * ag.segProgress;
-          ag.x += (targetX - ag.x) * Math.min(1, safeDt * 6.5);
-          ag.z += (targetZ - ag.z) * Math.min(1, safeDt * 6.5);
-          ag.heading = Math.atan2(seg.dirX * ag.segDir, seg.dirZ * ag.segDir);
+          if (!enteredCrosswalk) {
+            const curSeg = sidewalkSegs[ag.segIdx] ?? seg;
+            const clampedP = Math.max(0, Math.min(curSeg.len, ag.segProgress));
+            const targetX = curSeg.x0 + curSeg.dirX * clampedP;
+            const targetZ = curSeg.z0 + curSeg.dirZ * clampedP;
+            ag.x += (targetX - ag.x) * Math.min(1, safeDt * 6.5);
+            ag.z += (targetZ - ag.z) * Math.min(1, safeDt * 6.5);
+            const roadY = getRoadElevationAt(ag.x, ag.z);
+            ag.y = Math.max(0.155, roadY + 0.075);
+            ag.heading = Math.atan2(curSeg.dirX * ag.segDir, curSeg.dirZ * ag.segDir);
+          } else {
+            ag.x = ag.crossStartX;
+            ag.z = ag.crossStartZ;
+            ag.y = Math.max(0.155, getRoadElevationAt(ag.x, ag.z) + 0.075);
+          }
         }
       } else if (ag.role === 'crosswalk') {
         const ix = SIGNALIZED_INTERSECTIONS[ag.ixIdx];
@@ -963,6 +1832,8 @@ export function buildPedestrianSystem(
           const hasWalk = ag.crossAxis === 'ns' ? sig.pedCrossNS : sig.pedCrossEW;
 
           if (ag.crossState === 'wait') {
+            const roadY = getRoadElevationAt(ag.x, ag.z);
+            ag.y = Math.max(0.155, roadY + 0.075);
             if (hasWalk) {
               ag.crossState = 'crossing';
             }
@@ -988,6 +1859,8 @@ export function buildPedestrianSystem(
             const targetZ = ag.crossStartZ + (ag.crossEndZ - ag.crossStartZ) * ag.crossU;
             ag.x += (targetX - ag.x) * Math.min(1, safeDt * 7.5);
             ag.z += (targetZ - ag.z) * Math.min(1, safeDt * 7.5);
+            const roadY = getRoadElevationAt(ag.x, ag.z);
+            ag.y = Math.max(0.095, roadY + 0.015);
             ag.heading = Math.atan2(
               ag.crossEndX - ag.crossStartX,
               ag.crossEndZ - ag.crossStartZ
@@ -1043,6 +1916,36 @@ export function buildPedestrianSystem(
 
     for (let i = 0; i < totalCount; i++) {
       const ag = agents[i];
+      if (!ag.alive) {
+        // Hide dead NPC parts underground and hide gang weapon/sprite
+        setPart(leftThighInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(rightThighInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(leftShinInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(rightShinInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(leftBootInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(rightBootInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(hipsInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(coatSkirtInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(torsoInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(scarfInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(leftUpperArmInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(rightUpperArmInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(leftForearmInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(rightForearmInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(leftHandInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(rightHandInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(headInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(flowHairInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(hatInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(propInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        setPart(briefcaseInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        const gv = gangVisuals.get(i);
+        if (gv) {
+          gv.weapon.visible = false;
+          gv.suspicionSprite.visible = false;
+        }
+        continue;
+      }
       ag.sidestepYaw = THREE.MathUtils.damp(ag.sidestepYaw, ag.targetSidestep, 9.5, safeDt);
       const isWalking = walkingFlags[i] === 1;
 
@@ -1258,8 +2161,21 @@ export function buildPedestrianSystem(
         ag.hasProp &&
         ag.civClass !== 'streetwear_youth' &&
         ag.civClass !== 'student_runner';
-      const rArmFinalX = isCarryingBriefcase ? rArmX * 0.25 + 0.05 : rArmX;
-      const rForearmFinalX = isCarryingBriefcase ? rArmFinalX - 0.12 : rForearmX;
+      const isGang = ag.role === 'gang';
+      const rArmFinalX = isGang
+        ? ag.aiming
+          ? -1.24
+          : -0.36
+        : isCarryingBriefcase
+        ? rArmX * 0.25 + 0.05
+        : rArmX;
+      const rForearmFinalX = isGang
+        ? ag.aiming
+          ? -1.56
+          : -0.82
+        : isCarryingBriefcase
+        ? rArmFinalX - 0.12
+        : rForearmX;
 
       const shoulderY = baseY + 1.43 * h;
       setPart(
@@ -1334,6 +2250,33 @@ export function buildPedestrianSystem(
 
       setPart(leftHandInst, i, lHandX, lHandY, lHandZ, lForearmX, torsoYaw, 0.04, h, h, h);
       setPart(rightHandInst, i, rHandX, rHandY, rHandZ, rForearmFinalX, torsoYaw, -0.04, h, h, h);
+
+      // Sync gang member's shared weapon & filling "?" suspicion sprite above head
+      if (isGang) {
+        const gv = gangVisuals.get(i);
+        if (gv) {
+          gv.weapon.visible = true;
+          gv.weapon.position.set(rHandX, rHandY + 0.015 * h, rHandZ);
+          gv.weapon.rotation.set(rForearmFinalX + Math.PI * 0.5, torsoYaw, 0, 'YXZ');
+
+          const crew = crews[ag.crewIdx];
+          if (ag.alertBannerTimer > 0 && crew?.state === 'alert') {
+            gv.suspicionSprite.visible = true;
+            gv.suspicionSprite.position.set(bodyX, baseY + 2.08 * h, bodyZ);
+            (gv.suspicionSprite.material as THREE.SpriteMaterial).map = alertBang;
+          } else if (ag.suspicion > 0.02 && crew?.state !== 'alert') {
+            gv.suspicionSprite.visible = true;
+            gv.suspicionSprite.position.set(bodyX, baseY + 2.08 * h, bodyZ);
+            const stepIdx = Math.min(
+              questionSteps.length - 1,
+              Math.max(0, Math.round(ag.suspicion * (questionSteps.length - 1)))
+            );
+            (gv.suspicionSprite.material as THREE.SpriteMaterial).map = questionSteps[stepIdx];
+          } else {
+            gv.suspicionSprite.visible = false;
+          }
+        }
+      }
 
       const headY = baseY + 1.59 * h;
       setPart(headInst, i, bodyX, headY, bodyZ, headPitch, headYaw, -idleShift * 0.025, h, h, h);
@@ -1425,6 +2368,7 @@ export function buildPedestrianSystem(
     const r2 = radiusM * radiusM;
     for (let i = 0; i < totalCount; i++) {
       const ag = agents[i];
+      if (!ag.alive) continue;
       const dx = ag.x - origin.x;
       const dy = ag.y + 0.9 - origin.y;
       const dz = ag.z - origin.z;
@@ -1470,6 +2414,28 @@ export function buildPedestrianSystem(
     reseed,
     getRayTargets,
     getActiveSubtitle,
+    applyDamageToAgent,
+    notifyPlayerGunshot,
+    getHiddenHeat: () => hiddenHeat,
+    getGangCrewStates: () =>
+      crews.map((c) => {
+        let maxSusp = 0;
+        let aliveCount = 0;
+        for (let k = 0; k < c.memberIndices.length; k++) {
+          const m = agents[c.memberIndices[k]];
+          if (m.alive) aliveCount++;
+          if (m.suspicion > maxSusp) maxSusp = m.suspicion;
+        }
+        return {
+          id: c.id,
+          districtId: c.districtId,
+          state: c.state,
+          anchorX: c.anchorX,
+          anchorZ: c.anchorZ,
+          maxSuspicion: maxSusp,
+          memberCount: aliveCount,
+        };
+      }),
   };
 }
 

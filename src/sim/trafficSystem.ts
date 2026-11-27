@@ -23,7 +23,17 @@ export type TrafficArchetype =
   | 'pickup'
   | 'van'
   | 'truck'
+  | 'armored_truck'
   | 'patrol';
+
+export interface ArmoredTruckState {
+  id: number;
+  x: number;
+  y: number;
+  z: number;
+  heading: number;
+  speed: number;
+}
 
 export type TrafficZone = 'urban' | 'residential' | 'industrial' | 'rural' | 'security';
 export type ConflictStyle = 'squeeze' | 'cut_corner' | 'inch_push';
@@ -155,6 +165,7 @@ export interface TrafficSystemHandles {
     playerVz: number
   ) => TrafficCollisionResult;
   getBusStopArrivalFlags: () => boolean[];
+  getArmoredTruckStates: () => ArmoredTruckState[];
 }
 
 function classifyTrafficZone(worldX: number, worldZ: number, roadKind: string): TrafficZone {
@@ -599,6 +610,7 @@ function getVehicleDimensions(archetype: TrafficArchetype): {
   mass: number;
 } {
   if (archetype === 'bus') return { radius: 5.2, halfW: 1.34, halfL: 5.25, mass: 6.0 };
+  if (archetype === 'armored_truck') return { radius: 3.85, halfW: 1.24, halfL: 3.72, mass: 7.4 };
   if (archetype === 'truck') return { radius: 4.1, halfW: 1.3, halfL: 4.05, mass: 6.8 };
   if (archetype === 'van') return { radius: 2.65, halfW: 1.04, halfL: 2.52, mass: 1.9 };
   if (archetype === 'pickup') return { radius: 2.7, halfW: 1.04, halfL: 2.58, mass: 1.85 };
@@ -613,6 +625,9 @@ function getVehicleRollSpecs(archetype: TrafficArchetype): {
   cgFactor: number;
 } {
   // Exact outer mesh bounds (including cargo boxes, lightbars, bumpers & mirrors) so NO corner ever clips the road
+  if (archetype === 'armored_truck') {
+    return { bodyH: 2.86, boundHalfW: 1.3, boundHalfL: 3.82, cgFactor: 1.26 };
+  }
   if (archetype === 'truck') {
     return { bodyH: 3.12, boundHalfW: 1.38, boundHalfL: 4.12, cgFactor: 1.38 };
   }
@@ -978,6 +993,69 @@ function buildTrafficVehicleMesh(
     addRearDetailPack(-3.98, 0.92, 0.68, 1.15);
     addSideMirrors(1.32, 1.95, 3.1);
     addWheelSet(1.15, [-2.75, -1.35, 2.42], 0.5, sharedGeo.wheelLarge, sharedGeo.rimLarge, sharedGeo.fenderArchLarge);
+  } else if (archetype === 'armored_truck') {
+    const steelArmorMat = new THREE.MeshStandardMaterial({
+      color: '#28313d',
+      roughness: 0.44,
+      metalness: 0.68,
+    });
+    const stripeMat = new THREE.MeshStandardMaterial({
+      color: '#d8b24c',
+      roughness: 0.36,
+      metalness: 0.4,
+    });
+    const ramMat = new THREE.MeshStandardMaterial({
+      color: '#14181e',
+      roughness: 0.65,
+      metalness: 0.55,
+    });
+    // Heavy armored vault box + integrated hood cab
+    const vaultHull = new THREE.Mesh(new THREE.BoxGeometry(2.38, 2.02, 5.2), steelArmorMat);
+    vaultHull.position.set(0, 1.62, -0.82);
+    g.add(vaultHull);
+    const cabArmor = new THREE.Mesh(new THREE.BoxGeometry(2.22, 1.56, 2.05), steelArmorMat);
+    cabArmor.position.set(0, 1.34, 2.48);
+    g.add(cabArmor);
+    // Narrow armored slit windshield
+    const slitGlass = new THREE.Mesh(new THREE.BoxGeometry(1.88, 0.42, 0.1), glassMat);
+    slitGlass.position.set(0, 1.84, 3.48);
+    g.add(slitGlass);
+    // Gold/amber security stripes along left/right vault flanks
+    for (const sx of [-1.2, 1.2]) {
+      const sideStripe = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.14, 4.95), stripeMat);
+      sideStripe.position.set(sx, 1.44, -0.82);
+      g.add(sideStripe);
+    }
+    // Reinforced front bull-bar ram
+    const frontRam = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.36, 0.22), ramMat);
+    frontRam.position.set(0, 0.72, 3.6);
+    g.add(frontRam);
+    // Double rear vault lock bar & hinges
+    const lockBar = new THREE.Mesh(new THREE.BoxGeometry(1.65, 0.1, 0.08), alloyMat);
+    lockBar.position.set(0, 1.52, -3.44);
+    g.add(lockBar);
+    const amberBeacon = new THREE.Mesh(
+      new THREE.BoxGeometry(0.95, 0.14, 0.22),
+      new THREE.MeshStandardMaterial({
+        color: '#f59e0b',
+        emissive: new THREE.Color('#f59e0b'),
+        emissiveIntensity: isParked ? 0.15 : 2.1,
+      })
+    );
+    amberBeacon.position.set(0, 2.7, 1.55);
+    g.add(amberBeacon);
+    for (const sx of [-0.78, 0.78]) {
+      const hl = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.14, 0.08), headMat);
+      hl.position.set(sx, 1.0, 3.52);
+      g.add(hl);
+      const tl = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.24, 0.08), brakeMat);
+      tl.position.set(sx, 0.96, -3.44);
+      g.add(tl);
+    }
+    addTurnSignals(1.0, 1.0, 3.5, 0.96, -3.44);
+    addRearDetailPack(-3.44, 0.96, 0.66, 1.08);
+    addSideMirrors(1.26, 1.72, 2.75);
+    addWheelSet(1.1, [-2.2, 2.05], 0.5, sharedGeo.wheelLarge, sharedGeo.rimLarge, sharedGeo.fenderArchLarge);
   } else if (archetype === 'van') {
     const hull = new THREE.Mesh(sharedGeo.vanBody, bodyMat);
     hull.position.y = 1.18;
@@ -1479,8 +1557,10 @@ export function buildTrafficSystem(
   for (let i = 0; i < 5; i++) fleetRoster.push({ archetype: 'suv', homeZone: 'rural' });
   for (let i = 0; i < 3; i++) fleetRoster.push({ archetype: 'bus', homeZone: 'rural' });
   for (let i = 0; i < 3; i++) fleetRoster.push({ archetype: 'truck', homeZone: 'rural' });
-  // Security (12)
+  // Security & Armored Cash Transport (14)
   for (let i = 0; i < 7; i++) fleetRoster.push({ archetype: 'patrol', homeZone: 'security' });
+  fleetRoster.push({ archetype: 'armored_truck', homeZone: 'urban' });
+  fleetRoster.push({ archetype: 'armored_truck', homeZone: 'industrial' });
   for (let i = 0; i < 3; i++) fleetRoster.push({ archetype: 'suv', homeZone: 'security' });
   for (let i = 0; i < 2; i++) fleetRoster.push({ archetype: 'van', homeZone: 'security' });
 
@@ -1492,7 +1572,7 @@ export function buildTrafficSystem(
     if (seg.nextIndices.length === 0) return { nextIdx: -1, turn: 0 };
 
     const nextIdx =
-      archetype === 'bus' || archetype === 'truck'
+      archetype === 'bus' || archetype === 'truck' || archetype === 'armored_truck'
         ? seg.nextIndices[0]
         : seg.nextIndices[Math.floor(rng() * seg.nextIndices.length)];
 
@@ -1623,6 +1703,8 @@ export function buildTrafficSystem(
         ? coupeColors[i % coupeColors.length]
         : archetype === 'pickup'
         ? pickupColors[i % pickupColors.length]
+        : archetype === 'armored_truck'
+        ? '#28313d'
         : archetype === 'truck'
         ? i % 2 === 0
           ? '#9c5222'
@@ -1645,7 +1727,7 @@ export function buildTrafficSystem(
     const cruiseScale =
       archetype === 'bus'
         ? 0.85 + rng() * 0.14
-        : archetype === 'truck'
+        : archetype === 'truck' || archetype === 'armored_truck'
         ? 0.84 + rng() * 0.14
         : archetype === 'coupe' || archetype === 'patrol'
         ? 1.06 + rng() * 0.18
@@ -1655,7 +1737,7 @@ export function buildTrafficSystem(
     // ~62% average drivers squeeze neatly through the tight gap, ~20% cut a tight corner aggressively, ~18% inch/bump player!
     const rollStyle = rng();
     let conflictStyle: ConflictStyle = 'squeeze';
-    if (archetype === 'truck' || archetype === 'patrol' || archetype === 'pickup') {
+    if (archetype === 'truck' || archetype === 'armored_truck' || archetype === 'patrol' || archetype === 'pickup') {
       conflictStyle = rollStyle < 0.42 ? 'inch_push' : rollStyle < 0.72 ? 'squeeze' : 'cut_corner';
     } else if (archetype === 'coupe' || archetype === 'taxi') {
       conflictStyle = rollStyle < 0.56 ? 'squeeze' : rollStyle < 0.86 ? 'cut_corner' : 'inch_push';
@@ -1708,7 +1790,7 @@ export function buildTrafficSystem(
       beaconMat: built.beaconMat,
     };
 
-    const majorOnly = archetype === 'bus';
+    const majorOnly = archetype === 'bus' || archetype === 'armored_truck';
     const segIdx =
       homeZone === 'urban'
         ? findClearSegment(0, 45, 28, 280, 'urban', majorOnly)
@@ -1729,7 +1811,7 @@ export function buildTrafficSystem(
     const playerZone = classifyTrafficZone(playerX, playerZ, 'street');
     for (let i = 0; i < agents.length; i++) {
       const a = agents[i];
-      const majorOnly = a.archetype === 'bus';
+      const majorOnly = a.archetype === 'bus' || a.archetype === 'armored_truck';
       const segIdx =
         a.homeZone === playerZone || i < 36
           ? findClearSegment(playerX, playerZ, 30, 250, a.homeZone, majorOnly)
@@ -2189,7 +2271,7 @@ export function buildTrafficSystem(
             65,
             250,
             a.homeZone === playerZone ? playerZone : null,
-            a.archetype === 'bus'
+            a.archetype === 'bus' || a.archetype === 'armored_truck'
           );
           placeAgentOnSegment(a, newSeg, 0.05);
           continue;
@@ -3028,5 +3110,16 @@ export function buildTrafficSystem(
     update,
     resolvePlayerTrafficCollision,
     getBusStopArrivalFlags: () => busStopArrivalFlags,
+    getArmoredTruckStates: () =>
+      agents
+        .filter((a) => a.archetype === 'armored_truck')
+        .map((a) => ({
+          id: a.id,
+          x: a.x,
+          y: a.group.position.y,
+          z: a.z,
+          heading: a.heading,
+          speed: a.speed,
+        })),
   };
 }

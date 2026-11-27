@@ -33,7 +33,11 @@ import { createHeroCar, HeadlightMode, HeroCarRig } from './carModel';
 import { IcyVehiclePhysics, VehicleInput } from './physics';
 import { createEnvironmentSystem, EnvironmentHandles } from './environment';
 import { createTireTrailSystem, TireTrailHandles } from './tireTrails';
-import { buildPedestrianSystem, PedestrianSystemHandles } from './pedestrianSystem';
+import {
+  buildPedestrianSystem,
+  PedestrianSystemHandles,
+  PedPlayerContext,
+} from './pedestrianSystem';
 import { buildInfrastructureSystem, InfrastructureHandles } from './infrastructureSystem';
 import { DrivingAudioEngine } from './audio';
 import {
@@ -41,6 +45,16 @@ import {
   InteriorRegistry,
   WorldInteractable,
 } from './interiors/interiorRegistry';
+import { createFpsWeaponView, FpsWeaponViewHandles } from './fpsWeaponView';
+import { SharedWeaponFxPool } from './sharedWeapon';
+import {
+  buildZombieSystem,
+  ZombieCivilianTarget,
+  ZombiePlayerContext,
+  ZombieSystemHandles,
+} from './zombieSystem';
+import { buildCrimeDirector, CrimeDirectorHandles } from './crimeDirector';
+import { buildRadioSystem, RadioSystemHandles } from './radioSystem';
 
 export type CameraPreset = 'chase' | 'close' | 'hood';
 
@@ -338,6 +352,15 @@ export class DrivingEngine {
   private env: EnvironmentHandles;
   private tireTrails: TireTrailHandles;
   private pedestrians: PedestrianSystemHandles;
+  private zombies: ZombieSystemHandles;
+  private crimeDirector: CrimeDirectorHandles;
+  private radio: RadioSystemHandles;
+  private _zombieCivilians: ZombieCivilianTarget[] = [];
+  private _zombiePlayerCtx: ZombiePlayerContext = {
+    pos: new THREE.Vector3(),
+    inVehicle: true,
+    speedKmh: 0,
+  };
   private audio: DrivingAudioEngine;
 
   // Faint live running city reflection CubeCamera on hero car (throttled for 60fps!)
@@ -374,6 +397,17 @@ export class DrivingEngine {
 
   // Spec 3: External FPS engine bridge contract (mode mirroring + hooks)
   private fpsBridge: FpsBridge = { hooks: null, mode: 'driving' };
+  private fpsWeaponFxPool: SharedWeaponFxPool;
+  private fpsWeaponView: FpsWeaponViewHandles;
+  private renderedFrames = 0;
+  private stillMode =
+    typeof window !== 'undefined' && window.location.search.includes('stillMode=1');
+
+  // Pointer click-vs-drag tracking for existing mouse controls
+  private pointerDownX = 0;
+  private pointerDownY = 0;
+  private pointerDownBtn = -1;
+  private pointerDragDist = 0;
 
   // Spec 6: Autonomous Road-Following Car Call state
   private carCallActive = false;
@@ -435,6 +469,11 @@ export class DrivingEngine {
   private readonly _camRight = new THREE.Vector3();
   private readonly _camUp = new THREE.Vector3();
   private readonly _deltaFwd = new THREE.Vector3();
+  private readonly _pedPlayerCtx: PedPlayerContext = {
+    pos: new THREE.Vector3(),
+    inVehicle: true,
+    speedKmh: 0,
+  };
 
   constructor(
     container: HTMLElement,
@@ -451,6 +490,7 @@ export class DrivingEngine {
     this.renderer = new THREE.WebGLRenderer({
       antialias: !this.isSoftwareGl,
       powerPreference: 'high-performance',
+      preserveDrawingBuffer: this.stillMode,
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -465,16 +505,19 @@ export class DrivingEngine {
 
     // 2. Scene + Custom Dark Wet-City Midnight PMREM Environment (ZERO bright top glare!)
     this.scene = new THREE.Scene();
-    this.scene.environment = buildDarkCityNightEnv(this.renderer);
-    this.scene.environmentIntensity = 0.72;
+    if (!this.stillMode) {
+      this.scene.environment = buildDarkCityNightEnv(this.renderer);
+      this.scene.environmentIntensity = 0.72;
+    }
 
     // 3. Perspective Camera
     this.camera = new THREE.PerspectiveCamera(
       58,
       Math.max(1, container.clientWidth) / Math.max(1, container.clientHeight),
       0.15,
-      1900
+      this.stillMode ? 480 : 1900
     );
+    this.scene.add(this.camera);
 
     // 4. Ultra-Restrained Post-Processing (High threshold 1.45 prevents ANY blinding reflection fireball!)
     if (!this.isSoftwareGl) {
@@ -564,6 +607,9 @@ export class DrivingEngine {
     );
     this.scene.add(this.pedestrians.root);
 
+    this.zombies = buildZombieSystem(this.collisionWorld);
+    this.scene.add(this.zombies.root);
+
     this.car = createHeroCar(this.textures, this.isSoftwareGl);
     this.scene.add(this.car.root);
 
@@ -585,7 +631,36 @@ export class DrivingEngine {
     this.car.root.rotation.y = this.physics.state.heading;
 
     this.env = createEnvironmentSystem(this.scene, this.textures, this.isSoftwareGl);
+    if (this.stillMode) {
+      this.env.hemiLight.intensity = 0.85;
+      this.env.sunLight.intensity = 0.72;
+    }
     this.audio = new DrivingAudioEngine();
+
+    this.fpsWeaponFxPool = new SharedWeaponFxPool(24);
+    this.scene.add(this.fpsWeaponFxPool.root);
+    this.crimeDirector = buildCrimeDirector(this.collisionWorld, this.fpsWeaponFxPool);
+    this.scene.add(this.crimeDirector.root);
+    this.radio = buildRadioSystem(this.textures, this.collisionWorld, this.interiorRegistry);
+    this.scene.add(this.radio.root);
+    this.fpsWeaponView = createFpsWeaponView(this.camera, {
+      getRayTargets: (origin, radiusM) => this.getFpsRayTargets(origin, radiusM),
+      collisionWorld: this.collisionWorld,
+      fxPool: this.fpsWeaponFxPool,
+      onHitNpc: (agentId, damage, shooterPos) => {
+        if (agentId.startsWith('zombie_')) {
+          this.zombies.applyDamage(agentId, damage, shooterPos);
+        } else if (agentId.startsWith('crime_')) {
+          this.crimeDirector.applyDamage(agentId, damage, shooterPos);
+        } else {
+          this.pedestrians.applyDamageToAgent(agentId, damage, shooterPos);
+        }
+      },
+      onPlayShotSound: () => {
+        if (!this.audioMuted) this.audio.playGunshot(0);
+      },
+    });
+    this.setFpsBridgeHooks(this.fpsWeaponView.hooks);
 
     this.snapCameraBehindCar();
 
@@ -595,7 +670,53 @@ export class DrivingEngine {
 
     this.bindEvents();
     this.lastTimestamp = performance.now();
-    this.tick();
+    (window as unknown as { __islandEngine?: DrivingEngine }).__islandEngine = this;
+    if (this.stillMode) {
+      this.paused = true;
+    } else {
+      this.tick();
+    }
+  }
+
+  public getPedestrians(): PedestrianSystemHandles {
+    return this.pedestrians;
+  }
+
+  public getZombies(): ZombieSystemHandles {
+    return this.zombies;
+  }
+
+  public getCrimeDirector(): CrimeDirectorHandles {
+    return this.crimeDirector;
+  }
+
+  public getTraffic(): TrafficSystemHandles {
+    return this.traffic;
+  }
+
+  public getRadio(): RadioSystemHandles {
+    return this.radio;
+  }
+
+  public getFpsWeaponView(): FpsWeaponViewHandles {
+    return this.fpsWeaponView;
+  }
+
+  public getRenderedFrames(): number {
+    return this.renderedFrames;
+  }
+
+  /** Renders one deterministic frame for headless stillMode verification captures. */
+  public renderStillFrame(): number {
+    const dt = 1 / 60;
+    this.runFrame(dt, this.elapsed + dt, true);
+    return this.renderedFrames;
+  }
+
+  /** Renders one frame and reads the WebGL canvas directly as PNG data URL (stillMode only). */
+  public renderAndCaptureStillDataUrl(): string {
+    this.renderStillFrame();
+    return this.renderer.domElement.toDataURL('image/png');
   }
 
   private snapCameraBehindCar() {
@@ -622,10 +743,15 @@ export class DrivingEngine {
 
     const dom = this.renderer.domElement;
     dom.addEventListener('pointerdown', this.handlePointerDown);
+    dom.addEventListener('contextmenu', this.handleContextMenu);
     window.addEventListener('pointermove', this.handlePointerMove);
     window.addEventListener('pointerup', this.handlePointerUp);
     dom.addEventListener('webglcontextlost', this.handleContextLost);
   }
+
+  private handleContextMenu = (e: MouseEvent) => {
+    e.preventDefault();
+  };
 
   private handleContextLost = (e: Event) => {
     e.preventDefault();
@@ -658,6 +784,10 @@ export class DrivingEngine {
       this.isPointerDragging = true;
       this.lastPointerX = e.clientX;
       this.lastPointerY = e.clientY;
+      this.pointerDownX = e.clientX;
+      this.pointerDownY = e.clientY;
+      this.pointerDownBtn = e.button;
+      this.pointerDragDist = 0;
     }
   };
 
@@ -665,6 +795,7 @@ export class DrivingEngine {
     if (!this.isPointerDragging) return;
     const dx = e.clientX - this.lastPointerX;
     const dy = e.clientY - this.lastPointerY;
+    this.pointerDragDist += Math.hypot(dx, dy);
     this.lastPointerX = e.clientX;
     this.lastPointerY = e.clientY;
 
@@ -679,7 +810,20 @@ export class DrivingEngine {
   };
 
   private handlePointerUp = () => {
+    if (
+      this.isPointerDragging &&
+      !this.paused &&
+      this.pointerDragDist < 6 &&
+      (this.walkMode || this.trainMode)
+    ) {
+      if (this.pointerDownBtn === 0) {
+        this.fpsWeaponView.triggerFire();
+      } else if (this.pointerDownBtn === 2) {
+        this.fpsWeaponView.toggleDraw();
+      }
+    }
     this.isPointerDragging = false;
+    this.pointerDownBtn = -1;
   };
 
   private handleKeyDown = (e: KeyboardEvent) => {
@@ -702,9 +846,13 @@ export class DrivingEngine {
     }
 
     if (code === 'KeyL') this.cycleHeadlights();
-    else if (code === 'KeyC') this.cycleCameraPreset();
-    else if (code === 'KeyR') this.resetToNearestRoad();
-    else if (code === 'KeyV') this.recenterCamera();
+    else if (code === 'KeyC') {
+      if (this.walkMode || this.trainMode) this.fpsWeaponView.toggleDraw();
+      else this.cycleCameraPreset();
+    } else if (code === 'KeyR') {
+      if (this.walkMode || this.trainMode) this.fpsWeaponView.triggerReload();
+      else this.resetToNearestRoad();
+    } else if (code === 'KeyV') this.recenterCamera();
     else if (code === 'KeyT') this.toggleTrainMode();
     else if (code === 'KeyG') {
       if (this.walkMode) {
@@ -882,6 +1030,12 @@ export class DrivingEngine {
 
     const pedTargets = this.pedestrians.getRayTargets(origin, radiusM);
     for (let i = 0; i < pedTargets.length; i++) out.push(pedTargets[i]);
+
+    const zombieTargets = this.zombies.getRayTargets(origin, radiusM);
+    for (let i = 0; i < zombieTargets.length; i++) out.push(zombieTargets[i]);
+
+    const crimeTargets = this.crimeDirector.getRayTargets(origin, radiusM);
+    for (let i = 0; i < crimeTargets.length; i++) out.push(crimeTargets[i]);
 
     const metroTargets = this.metro.getRayTargets(origin, radiusM);
     for (let i = 0; i < metroTargets.length; i++) out.push(metroTargets[i]);
@@ -1300,10 +1454,19 @@ export class DrivingEngine {
           this.cycleHeadlights();
         }
       }
-      if (isJustPressed(3)) this.cycleCameraPreset();
+      if (isJustPressed(3)) {
+        if (this.walkMode || this.trainMode) this.fpsWeaponView.toggleDraw();
+        else this.cycleCameraPreset();
+      }
+      if ((this.walkMode || this.trainMode) && rt > 0.25) {
+        this.fpsWeaponView.triggerFire();
+      }
       if (isJustPressed(11)) this.recenterCamera();
       if (isJustPressed(4)) this.onToggleMap?.();
-      if (isJustPressed(5)) this.resetToNearestRoad();
+      if (isJustPressed(5)) {
+        if (this.walkMode || this.trainMode) this.fpsWeaponView.triggerReload();
+        else this.resetToNearestRoad();
+      }
       if (isJustPressed(14)) this.onMapZoomDelta?.(-1);
       if (isJustPressed(15)) this.onMapZoomDelta?.(1);
       if (this.isMapExpandedCheck?.()) {
@@ -1338,7 +1501,7 @@ export class DrivingEngine {
   }
 
   private tick = () => {
-    if (this.disposed) return;
+    if (this.disposed || this.stillMode) return;
 
     const now = performance.now();
     if (this.paused) {
@@ -1361,6 +1524,16 @@ export class DrivingEngine {
 
     const dt = Math.min(0.05, Math.max(0.001, (now - this.lastTimestamp) / 1000));
     this.lastTimestamp = now;
+    this.runFrame(dt, now, true);
+
+    if (this.isSoftwareGl) {
+      this.afterDraw(this.tick);
+    } else {
+      this.frameId = requestAnimationFrame(this.tick);
+    }
+  };
+
+  private runFrame(dt: number, now: number, doRender: boolean) {
     this.elapsed += dt;
 
     if (this.autoCycleTime) {
@@ -1780,12 +1953,68 @@ export class DrivingEngine {
       this.trainMode || this.walkMode ? 0 : s.vx,
       this.trainMode || this.walkMode ? 0 : s.vz
     );
+    this._pedPlayerCtx.pos.copy(
+      this.trainMode
+        ? trainState.worldPos
+        : this.walkMode
+        ? this.walkPos
+        : this.car.root.position
+    );
+    this._pedPlayerCtx.inVehicle = !this.walkMode && !this.trainMode;
+    this._pedPlayerCtx.speedKmh = this.walkMode ? this.walkSpeedKmh : s.speedKmh;
+    this._pedPlayerCtx.onPlayerHit = (damage) => {
+      this.physics.state.health = Math.max(0, this.physics.state.health - damage);
+    };
+    this._pedPlayerCtx.onGunshotSound = (distM) => {
+      if (!this.audioMuted) this.audio.playGunshot(distM);
+    };
     this.pedestrians.update(
       dt,
       this.elapsed,
       this.traffic.getBusStopArrivalFlags(),
       this.metro.getStationTrainFlags(),
-      this.walkMode && !this.walkOnStationShelter ? this.walkPos : undefined
+      this.walkMode && this.walkOnStationShelter ? undefined : this._pedPlayerCtx
+    );
+
+    // 7a. Undead Transport zombies (D5 forests, D7 ghettos, light city strays, outbreak events)
+    this._zombieCivilians.length = 0;
+    const pedAgents = this.pedestrians.agents;
+    for (let i = 0; i < pedAgents.length; i++) {
+      const a = pedAgents[i];
+      if (a.alive && a.role !== 'gang') {
+        this._zombieCivilians.push({ id: a.id, x: a.x, y: a.y, z: a.z });
+      }
+    }
+    this._zombiePlayerCtx.pos.copy(this._pedPlayerCtx.pos);
+    this._zombiePlayerCtx.inVehicle = this._pedPlayerCtx.inVehicle;
+    this._zombiePlayerCtx.speedKmh = this._pedPlayerCtx.speedKmh;
+    this._zombiePlayerCtx.onPlayerHit = this._pedPlayerCtx.onPlayerHit;
+    this.zombies.update(
+      dt,
+      this.elapsed,
+      this.walkMode && this.walkOnStationShelter ? undefined : this._zombiePlayerCtx,
+      this._zombieCivilians,
+      (pedId, damage, fromPos) => {
+        this.pedestrians.applyDamageToAgent(pedId, damage, fromPos);
+      }
+    );
+    this.crimeDirector.update(
+      dt,
+      this.elapsed,
+      this.traffic.getArmoredTruckStates(),
+      this._zombieCivilians,
+      (pedId, damage, fromPos) => {
+        this.pedestrians.applyDamageToAgent(pedId, damage, fromPos);
+      },
+      this.walkMode && this.walkOnStationShelter ? undefined : this._pedPlayerCtx
+    );
+    this.radio.update(
+      dt,
+      this.elapsed,
+      this._focusVec.x,
+      this._focusVec.z,
+      getDistrictAt(this._focusVec.x, this._focusVec.z),
+      this.pedestrians.getHiddenHeat()
     );
 
     // 7b. Faint Live Running City Reflections on the Hero Car (throttled every 3rd frame for smooth 60fps!)
@@ -1868,25 +2097,26 @@ export class DrivingEngine {
       if (this.actionToastTimer <= 0) this.actionToast = '';
     }
 
+    // 9C. Update FPS Weapon Viewmodel & Shared Weapon FX Pool
+    this.fpsWeaponFxPool.update(dt);
+    this.fpsWeaponView.update(dt, this.elapsed, this.camera, this.walkSpeedKmh);
+
     // 10. Render Frame
-    if (this.composer && !this.isSoftwareGl) {
-      this.composer.render();
-    } else {
-      this.renderer.render(this.scene, this.camera);
+    if (doRender) {
+      if (this.composer && !this.isSoftwareGl) {
+        this.composer.render();
+      } else {
+        this.renderer.render(this.scene, this.camera);
+      }
+      this.renderedFrames++;
     }
 
     // 11. Emit Throttled Telemetry to Minimal React HUD
-    if (now - this.lastTelemetryEmit > 82) {
+    if (doRender || now - this.lastTelemetryEmit > 82) {
       this.lastTelemetryEmit = now;
       this.emitTelemetrySnapshot();
     }
-
-    if (this.isSoftwareGl) {
-      this.afterDraw(this.tick);
-    } else {
-      this.frameId = requestAnimationFrame(this.tick);
-    }
-  };
+  }
 
   private emitTelemetrySnapshot() {
     const s = this.physics.state;
@@ -1950,8 +2180,9 @@ export class DrivingEngine {
       ? this.metro.getActiveSubtitle(activeX, activeY, activeZ)
       : this.walkMode
       ? this.pedestrians.getActiveSubtitle(activeX, activeY, activeZ) ||
-        this.metro.getActiveSubtitle(activeX, activeY, activeZ)
-      : '';
+        this.metro.getActiveSubtitle(activeX, activeY, activeZ) ||
+        this.radio.getActiveBroadcastSubtitle(activeX, activeY, activeZ, this.elapsed, false)
+      : this.radio.getActiveBroadcastSubtitle(activeX, activeY, activeZ, this.elapsed, true);
 
     this.onTelemetry({
       speedKmh: this.walkMode ? Math.round(this.walkSpeedKmh) : Math.round(s.speedKmh),
@@ -2017,7 +2248,13 @@ export class DrivingEngine {
     window.removeEventListener('pointermove', this.handlePointerMove);
     window.removeEventListener('pointerup', this.handlePointerUp);
     this.renderer.domElement.removeEventListener('pointerdown', this.handlePointerDown);
+    this.renderer.domElement.removeEventListener('contextmenu', this.handleContextMenu);
     this.renderer.domElement.removeEventListener('webglcontextlost', this.handleContextLost);
+
+    this.fpsWeaponView.dispose();
+    this.zombies.dispose();
+    this.crimeDirector.dispose();
+    this.radio.dispose();
 
     this.audio.dispose();
     this.textures.dispose();

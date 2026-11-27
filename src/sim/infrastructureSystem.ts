@@ -271,6 +271,7 @@ export function buildInfrastructureSystem(
   // 1. PAINTED ZEBRA CROSSWALKS + WORKING 4-WAY TRAFFIC LIGHTS + STREET SIGNS
   // =========================================================================
   const zebraTransforms: { x: number; z: number; rotY: number; len: number }[] = [];
+  const tactileTransforms: { x: number; z: number; rotY: number; w: number }[] = [];
   const signalRigs: TrafficLightRig[] = [];
 
   const lensGeo = new THREE.CircleGeometry(0.14, 10);
@@ -280,7 +281,7 @@ export function buildInfrastructureSystem(
   for (let i = 0; i < SIGNALIZED_INTERSECTIONS.length; i++) {
     const ix = SIGNALIZED_INTERSECTIONS[i];
 
-    // 4 Zebra Crosswalks around intersection (N, S, E, W)
+    // 4 Zebra Crosswalks around intersection (N, S, E, W) + tactile curb ramps
     const spanNS = ix.halfSpanNS;
     const spanEW = ix.halfSpanEW;
 
@@ -291,6 +292,8 @@ export function buildInfrastructureSystem(
         const u = (s / (stripes - 1) - 0.5) * (spanNS * 1.58);
         zebraTransforms.push({ x: ix.x + u, z: ix.z + sz, rotY: 0, len: 3.1 });
       }
+      tactileTransforms.push({ x: ix.x - spanNS - 0.55, z: ix.z + sz, rotY: 0, w: 3.0 });
+      tactileTransforms.push({ x: ix.x + spanNS + 0.55, z: ix.z + sz, rotY: 0, w: 3.0 });
     }
     // East & West crosswalks (pedestrians cross N-S across the E-W road)
     for (const sx of [-spanNS - 1.8, spanNS + 1.8]) {
@@ -299,6 +302,8 @@ export function buildInfrastructureSystem(
         const u = (s / (stripes - 1) - 0.5) * (spanEW * 1.58);
         zebraTransforms.push({ x: ix.x + sx, z: ix.z + u, rotY: Math.PI * 0.5, len: 3.1 });
       }
+      tactileTransforms.push({ x: ix.x + sx, z: ix.z - spanEW - 0.55, rotY: Math.PI * 0.5, w: 3.0 });
+      tactileTransforms.push({ x: ix.x + sx, z: ix.z + spanEW + 0.55, rotY: Math.PI * 0.5, w: 3.0 });
     }
 
     // Per-intersection animated signal lens materials (1 material shared across matching heads!)
@@ -419,6 +424,34 @@ export function buildInfrastructureSystem(
     }
   }
 
+  // Mid-block avenue & archipelago crosswalks with curb-cut tactile plates
+  const midBlockCrosswalks: { x: number; z: number; axis: 'ns' | 'ew'; halfSpan: number }[] = [
+    { x: 0, z: -165, axis: 'ns', halfSpan: 11.5 },
+    { x: 0, z: 165, axis: 'ns', halfSpan: 11.5 },
+    { x: -245, z: 0, axis: 'ew', halfSpan: 10.5 },
+    { x: 245, z: 0, axis: 'ew', halfSpan: 10.5 },
+    { x: 1190, z: 84, axis: 'ew', halfSpan: 8.5 }, // D7 Institutskaya
+    { x: 1595, z: 442, axis: 'ew', halfSpan: 7.5 }, // D8 Quay
+  ];
+  for (const mc of midBlockCrosswalks) {
+    const stripes = Math.max(5, Math.floor((mc.halfSpan * 1.7) / 1.8));
+    for (let s = 0; s < stripes; s++) {
+      const u = (s / (stripes - 1) - 0.5) * (mc.halfSpan * 1.52);
+      if (mc.axis === 'ns') {
+        zebraTransforms.push({ x: mc.x + u, z: mc.z, rotY: 0, len: 3.0 });
+      } else {
+        zebraTransforms.push({ x: mc.x, z: mc.z + u, rotY: Math.PI * 0.5, len: 3.0 });
+      }
+    }
+    if (mc.axis === 'ns') {
+      tactileTransforms.push({ x: mc.x - mc.halfSpan - 0.5, z: mc.z, rotY: 0, w: 3.0 });
+      tactileTransforms.push({ x: mc.x + mc.halfSpan + 0.5, z: mc.z, rotY: 0, w: 3.0 });
+    } else {
+      tactileTransforms.push({ x: mc.x, z: mc.z - mc.halfSpan - 0.5, rotY: Math.PI * 0.5, w: 3.0 });
+      tactileTransforms.push({ x: mc.x, z: mc.z + mc.halfSpan + 0.5, rotY: Math.PI * 0.5, w: 3.0 });
+    }
+  }
+
   // Render ALL zebra crosswalk stripes in a single GPU InstancedMesh!
   const stripeGeo = new THREE.PlaneGeometry(0.68, 1.0);
   stripeGeo.rotateX(-Math.PI * 0.5);
@@ -433,7 +466,8 @@ export function buildInfrastructureSystem(
   const zDummy = new THREE.Object3D();
   for (let i = 0; i < zebraTransforms.length; i++) {
     const zt = zebraTransforms[i];
-    zDummy.position.set(zt.x, 0.107, zt.z);
+    const roadY = getRoadElevationAt(zt.x, zt.z);
+    zDummy.position.set(zt.x, Math.max(0.107, roadY + 0.014), zt.z);
     zDummy.rotation.set(0, zt.rotY, 0);
     zDummy.scale.set(1, 1, zt.len);
     zDummy.updateMatrix();
@@ -442,6 +476,31 @@ export function buildInfrastructureSystem(
   zebraInst.instanceMatrix.needsUpdate = true;
   zebraInst.receiveShadow = true;
   root.add(zebraInst);
+
+  // Tactile yellow curb-cut plates at crosswalk ends
+  if (tactileTransforms.length > 0) {
+    const tacGeo = new THREE.PlaneGeometry(0.85, 1.0);
+    tacGeo.rotateX(-Math.PI * 0.5);
+    const tacMat = new THREE.MeshStandardMaterial({
+      color: '#d9a424',
+      roughness: 0.65,
+      metalness: 0.06,
+      polygonOffset: true,
+      polygonOffsetFactor: -3,
+    });
+    const tacInst = new THREE.InstancedMesh(tacGeo, tacMat, tactileTransforms.length);
+    for (let i = 0; i < tactileTransforms.length; i++) {
+      const tt = tactileTransforms[i];
+      const roadY = getRoadElevationAt(tt.x, tt.z);
+      zDummy.position.set(tt.x, Math.max(0.158, roadY + 0.074), tt.z);
+      zDummy.rotation.set(0, tt.rotY, 0);
+      zDummy.scale.set(1, 1, tt.w);
+      zDummy.updateMatrix();
+      tacInst.setMatrixAt(i, zDummy.matrix);
+    }
+    tacInst.instanceMatrix.needsUpdate = true;
+    root.add(tacInst);
+  }
 
   // =========================================================================
   // 2. DISTRICT GATEWAY, ROADWAY GUIDE, [M] METRO & [A] BUS WAYFINDING SIGNS
