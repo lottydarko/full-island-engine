@@ -20,6 +20,7 @@ import {
   VenueKind,
 } from './mapData';
 import { TextureLibrary } from './textures';
+import { createAdBillboardMaterials } from './adAssets';
 import {
   ArchipelagoCallbacks,
   InteriorRegistry,
@@ -1948,6 +1949,8 @@ export function buildCityWorld(
   for (let v = 0; v < 16; v++) {
     billboardMats.push(createRussianBillboardMaterial(v, neonAnimatedMats));
   }
+  // lottydarko finalized ad art (Nov 26, 2026) joins the rotation.
+  for (const m of createAdBillboardMaterials()) billboardMats.push(m);
   const steelTrussMat = new THREE.MeshStandardMaterial({
     color: '#20262e',
     roughness: 0.55,
