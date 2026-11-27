@@ -124,6 +124,7 @@ export function createFpsWeaponView(
   let drawFrac = 0; // 0 = holstered, 1 = ready
   let recoilKick = 0;
   let fireCooldown = 0;
+  let lastShotAtMs = -Infinity;
   let ammoInMag = SHARED_WEAPON_SPEC.magazineSize;
   let reloadTimer = 0;
   let swayPhase = 0;
@@ -189,17 +190,35 @@ export function createFpsWeaponView(
     if (!active || !drawn || drawFrac < 0.72 || reloadTimer > 0 || fireCooldown > 0) {
       return false;
     }
+    // Wall-clock rate gate: no input path (click, hold, gamepad, duplicate
+    // handler) can ever stack two shots inside one fire interval — one press
+    // is one shot, holding is a steady stream at the rated fire rate.
+    const nowMs = performance.now();
+    if (nowMs - lastShotAtMs < 1000 / SHARED_WEAPON_SPEC.fireRateHz) {
+      return false;
+    }
     if (ammoInMag <= 0) {
       triggerReload();
       return false;
     }
 
     ammoInMag--;
+    lastShotAtMs = nowMs;
     fireCooldown = 1 / SHARED_WEAPON_SPEC.fireRateHz;
     recoilKick = Math.min(1.0, recoilKick + 0.65);
 
     camera.getWorldDirection(_rayDir);
     muzzleObj.getWorldPosition(_muzzleWorld);
+    if (
+      !Number.isFinite(_muzzleWorld.x + _muzzleWorld.y + _muzzleWorld.z) ||
+      _muzzleWorld.distanceToSquared(camera.position) > 9
+    ) {
+      // Muzzle node's world matrix was stale (mode switch / pre-render frame):
+      // anchor the tracer to the eye so a shot can never appear to come from
+      // the sky or from world origin.
+      _muzzleWorld.copy(camera.position).addScaledVector(_rayDir, 0.45);
+      _muzzleWorld.y -= 0.12;
+    }
 
     const targets = hooks.getRayTargets(camera.position, SHARED_WEAPON_SPEC.rangeM);
     const distTag = getDistrictAt(camera.position.x, camera.position.z).slice(0, 3).trim();

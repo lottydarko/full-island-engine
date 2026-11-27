@@ -429,6 +429,7 @@ export class DrivingEngine {
   private camYawVel = 0;
   private camPitchVel = 0;
   private isPointerDragging = false;
+  private mouseFireHeld = false;
   private lastPointerX = 0;
   private lastPointerY = 0;
 
@@ -789,6 +790,12 @@ export class DrivingEngine {
       this.pointerDownBtn = e.button;
       this.pointerDragDist = 0;
     }
+    // Fire on PRESS, not release — the old release-to-fire path made every
+    // shot feel late and ate any shot that started as a small drag.
+    if (e.button === 0 && !this.paused && (this.walkMode || this.trainMode)) {
+      this.mouseFireHeld = true;
+      this.fpsWeaponView.triggerFire();
+    }
   };
 
   private handlePointerMove = (e: PointerEvent) => {
@@ -810,17 +817,17 @@ export class DrivingEngine {
   };
 
   private handlePointerUp = () => {
+    if (this.pointerDownBtn === 0) {
+      this.mouseFireHeld = false;
+    }
     if (
       this.isPointerDragging &&
       !this.paused &&
       this.pointerDragDist < 6 &&
-      (this.walkMode || this.trainMode)
+      (this.walkMode || this.trainMode) &&
+      this.pointerDownBtn === 2
     ) {
-      if (this.pointerDownBtn === 0) {
-        this.fpsWeaponView.triggerFire();
-      } else if (this.pointerDownBtn === 2) {
-        this.fpsWeaponView.toggleDraw();
-      }
+      this.fpsWeaponView.toggleDraw();
     }
     this.isPointerDragging = false;
     this.pointerDownBtn = -1;
@@ -2098,6 +2105,11 @@ export class DrivingEngine {
     }
 
     // 9C. Update FPS Weapon Viewmodel & Shared Weapon FX Pool
+    // Hold-to-fire for the mouse, paced inside triggerFire by the weapon's
+    // own fire rate (same behavior the gamepad trigger already had).
+    if (this.mouseFireHeld && !this.paused && (this.walkMode || this.trainMode)) {
+      this.fpsWeaponView.triggerFire();
+    }
     this.fpsWeaponFxPool.update(dt);
     this.fpsWeaponView.update(dt, this.elapsed, this.camera, this.walkSpeedKmh);
 
