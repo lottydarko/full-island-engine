@@ -1,0 +1,6 @@
+{
+  "name": "Kronsk Island — Winter Driving Simulator",
+  "description": "A realistic third-person Russian winter driving simulator built from the Island District 1 & 2 urban blueprint, featuring icy road physics, day-night cycles, working headlights, and dense textured Soviet architecture.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
