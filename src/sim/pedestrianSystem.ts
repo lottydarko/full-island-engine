@@ -16,8 +16,17 @@ import { getIntersectionSignal } from './infrastructureSystem';
 import { MetroStationRuntimeInfo } from './metroSystem';
 import { TextureLibrary } from './textures';
 import {
-  applyClothWindShader,
-  getSharedHumanGeometries,
+  BODY_MANIFEST_MAP,
+  BODY_POOL_MANIFEST,
+  BodyManifestEntry,
+  HairStyleType,
+  HumanDressingConfig,
+  HumanPoseParams,
+  HumanRig,
+  OutfitStyleType,
+  applyHumanPose,
+  createRiggedHuman,
+  preloadHumanBodyPool,
 } from './humanCharacter';
 import {
   createSharedWeaponMesh,
@@ -48,6 +57,10 @@ export type PedPersonality = 'polite' | 'rude';
 
 export interface PedAgent {
   id: string;
+  bodyId: string;
+  outfitId: OutfitStyleType;
+  heightM: number;
+  eyeHeightM: number;
   faceId: string;
   fabricId: string;
   voiceSeed: number;
@@ -290,6 +303,89 @@ const ALL_CLASSES: CivilianClass[] = [
   'transit_guard',
 ];
 
+const CLASS_OUTFIT_POOL: Record<CivilianClass, OutfitStyleType[]> = {
+  executive: ['tailored_blazer', 'trench_coat'],
+  commuter: ['trench_coat', 'cardigan_scarf', 'puffer_jacket', 'tailored_blazer'],
+  working_class: ['metro_worker', 'rail_engineer', 'puffer_jacket', 'hoodie_parka'],
+  streetwear_youth: ['hoodie_parka', 'leather_biker', 'puffer_jacket'],
+  elder: ['cardigan_scarf', 'trench_coat'],
+  nightlife_patron: ['leather_biker', 'tailored_blazer', 'trench_coat'],
+  student_runner: ['hoodie_parka', 'puffer_jacket', 'cardigan_scarf'],
+  transit_guard: ['transit_security'],
+  gang_member: ['gang_2059'],
+};
+
+function assignBodyManifest(
+  civClass: CivilianClass,
+  districtId: string,
+  rng: () => number
+): BodyManifestEntry {
+  let totalWeight = 0;
+  const weights = new Float64Array(BODY_POOL_MANIFEST.length);
+  for (let i = 0; i < BODY_POOL_MANIFEST.length; i++) {
+    const entry = BODY_POOL_MANIFEST[i];
+    const b = entry.build;
+    let w = 1.0;
+
+    if (civClass === 'elder') {
+      w = entry.ageBand === 'elder' ? 14.0 : 0.08;
+    } else {
+      if (entry.ageBand === 'elder') w *= 0.12;
+      if (civClass === 'working_class' || civClass === 'transit_guard' || civClass === 'gang_member') {
+        if (/(broad|heavy|thick|muscular|sturdy)/i.test(b)) w *= 3.0;
+        if (entry.ageBand === 'adult' || entry.ageBand === 'middle-aged') w *= 1.4;
+      } else if (civClass === 'student_runner' || civClass === 'streetwear_youth') {
+        if (entry.ageBand === 'young-adult') w *= 3.2;
+        if (/(slim|lean|toned)/i.test(b)) w *= 2.4;
+      } else if (civClass === 'nightlife_patron') {
+        if (entry.ageBand === 'young-adult') w *= 2.4;
+        if (/(toned|tall-lean|slim)/i.test(b)) w *= 2.2;
+      } else if (civClass === 'executive') {
+        if (entry.ageBand === 'middle-aged' || entry.ageBand === 'adult') w *= 2.0;
+        if (/(trim|tall-lean|average|composed)/i.test(b)) w *= 1.8;
+      }
+    }
+
+    // District character flavor (D8 dock/industrial -> sturdier builds; D1 nightlife -> leaner/taller)
+    if (districtId === 'D8' && /(broad|heavy|thick|sturdy|muscular)/i.test(b)) {
+      w *= 1.45;
+    } else if (districtId === 'D1' && /(young-adult)/.test(entry.ageBand) && /(slim|lean|toned|tall)/i.test(b)) {
+      w *= 1.35;
+    }
+
+    weights[i] = w;
+    totalWeight += w;
+  }
+
+  let pickRoll = rng() * totalWeight;
+  for (let i = 0; i < BODY_POOL_MANIFEST.length; i++) {
+    pickRoll -= weights[i];
+    if (pickRoll <= 0) return BODY_POOL_MANIFEST[i];
+  }
+  return BODY_POOL_MANIFEST[0];
+}
+
+function pickOutfitForClass(civClass: CivilianClass, rng: () => number): OutfitStyleType {
+  const pool = CLASS_OUTFIT_POOL[civClass];
+  return pool[Math.floor(rng() * pool.length)];
+}
+
+function pickHairStyleForAgent(
+  gender: BodyManifestEntry['gender'],
+  usesCap: boolean,
+  voiceSeed: number
+): HairStyleType {
+  if (usesCap) {
+    return (voiceSeed & 1) === 0 ? 'knit_beanie' : 'newsboy_cap';
+  }
+  if (gender === 'female') {
+    const styles: HairStyleType[] = ['long_flowing', 'bob_cut', 'ponytail', 'side_part'];
+    return styles[voiceSeed % styles.length];
+  }
+  const styles: HairStyleType[] = ['short_cropped', 'side_part', 'long_flowing', 'short_cropped'];
+  return styles[voiceSeed % styles.length];
+}
+
 interface SidewalkSegment {
   x0: number;
   z0: number;
@@ -514,9 +610,15 @@ export function buildPedestrianSystem(
       const propIdx = Math.floor(rng() * pal.prop.length);
       const faceId = `f:${skinIdx}:${hairIdx}:${(voiceSeed >>> 0) & 255}`;
       const fabricId = `c:${jacketIdx}:${pantsIdx}:${bootsIdx}:${scarfIdx}:${hatIdx}:${propIdx}`;
+      const outfitId = pickOutfitForClass(civClass, rng);
+      const placeholderBody = BODY_POOL_MANIFEST[0];
 
       return {
         id,
+        bodyId: placeholderBody.bodyId,
+        outfitId,
+        heightM: placeholderBody.heightM,
+        eyeHeightM: placeholderBody.heightM * 0.9126,
         faceId,
         fabricId,
         voiceSeed,
@@ -733,7 +835,7 @@ export function buildPedestrianSystem(
     // 5. 2059 RUSSIA GANG CREWS (Crews of 3-5 in D8 Black Market Quay & D1 Nightlife)
     crews.length = 0;
     gangVisuals.forEach((v) => {
-      root.remove(v.weapon);
+      v.weapon.parent?.remove(v.weapon);
       root.remove(v.suspicionSprite);
     });
     gangVisuals.clear();
@@ -764,7 +866,8 @@ export function buildPedestrianSystem(
 
         // Shared weapon in hand + filling "?" suspicion sprite above head
         const weapon = createSharedWeaponMesh(0.95);
-        root.add(weapon);
+        weapon.position.set(0.0, -0.055, 0.025);
+        weapon.rotation.set(Math.PI * 0.5, 0, 0);
         const spriteMat = new THREE.SpriteMaterial({
           map: questionSteps[0],
           transparent: true,
@@ -796,6 +899,17 @@ export function buildPedestrianSystem(
         memberIndices,
       });
     }
+
+    // Assign real MakeHuman pool bodies weighted by class + spawn district (kept for life)
+    for (let i = 0; i < agents.length; i++) {
+      const ag = agents[i];
+      const distId = getDistrictAt(ag.x, ag.z);
+      const body = assignBodyManifest(ag.civClass, distId, rng);
+      ag.bodyId = body.bodyId;
+      ag.heightM = body.heightM;
+      ag.eyeHeightM = body.heightM * 0.9126;
+      ag.heightScale = body.heightM / 1.694;
+    }
   };
 
   spawnAgents();
@@ -810,231 +924,111 @@ export function buildPedestrianSystem(
     return h;
   };
 
-  // Ensure ~15% rude ratio is guaranteed across small test slices too
-  const geos = getSharedHumanGeometries();
-  const outdoorWindUniform = { value: 0.88 };
+  // Start async preloading of all 50 MakeHuman GLBs (load once, clone per agent)
+  preloadHumanBodyPool();
 
-  const clothMat = new THREE.MeshStandardMaterial({
-    map: textures.pedClothingMap,
-    roughnessMap: textures.pedClothingRoughness,
-    bumpMap: textures.pedClothingBump,
-    bumpScale: 0.032,
-    roughness: 0.9,
-    metalness: 0.02,
-    side: THREE.DoubleSide,
-  });
-  applyClothWindShader(clothMat, outdoorWindUniform, 'cloth-wind-inst-v3');
+  const pedRigsRoot = new THREE.Group();
+  root.add(pedRigsRoot);
+  const pedRigs: HumanRig[] = [];
+  const pedPoseSynced = new Uint8Array(Math.max(1, totalCount));
+  let frameCounter = 0;
 
-  const coatSkirtMat = new THREE.MeshStandardMaterial({
-    map: textures.pedFabricKnitMap,
-    roughnessMap: textures.pedFabricKnitRoughness,
-    bumpMap: textures.pedFabricKnitBump,
-    bumpScale: 0.042,
-    roughness: 0.94,
-    metalness: 0.02,
-    side: THREE.DoubleSide,
-  });
-  applyClothWindShader(coatSkirtMat, outdoorWindUniform, 'cloth-wind-inst-v3');
+  const buildAgentDressing = (ag: PedAgent, body: BodyManifestEntry): HumanDressingConfig => {
+    const pal = CLASS_OUTFIT_POOL[ag.civClass];
+    void pal;
+    const outfitPal = CLASS_OUTFITS[ag.civClass];
+    const fParts = ag.faceId.split(':');
+    const cParts = ag.fabricId.split(':');
+    const skinIdx = (Number(fParts[1]) || 0) % SKIN_TONES.length;
+    const hairIdx = (Number(fParts[2]) || 0) % HAIR_TONES.length;
+    const jacketIdx = (Number(cParts[1]) || 0) % outfitPal.jacket.length;
+    const pantsIdx = (Number(cParts[2]) || 0) % outfitPal.pants.length;
+    const bootsIdx = (Number(cParts[3]) || 0) % outfitPal.boots.length;
+    const scarfIdx = (Number(cParts[4]) || 0) % SCARF_TONES.length;
+    const hatIdx = (Number(cParts[5]) || 0) % outfitPal.hat.length;
+    const propIdx = (Number(cParts[6]) || 0) % outfitPal.prop.length;
 
-  const pantsMat = new THREE.MeshStandardMaterial({
-    map: textures.pedFabricDenimMap,
-    roughnessMap: textures.pedFabricDenimRoughness,
-    bumpMap: textures.pedFabricDenimBump,
-    bumpScale: 0.034,
-    roughness: 0.92,
-    metalness: 0.02,
-    side: THREE.DoubleSide,
-  });
-  applyClothWindShader(pantsMat, outdoorWindUniform, 'cloth-wind-inst-v3');
+    const usesBriefcase =
+      ag.hasProp &&
+      ag.civClass !== 'streetwear_youth' &&
+      ag.civClass !== 'student_runner' &&
+      ag.civClass !== 'working_class';
 
-  const scarfMat = new THREE.MeshStandardMaterial({
-    map: textures.pedFabricKnitMap,
-    roughnessMap: textures.pedFabricKnitRoughness,
-    bumpMap: textures.pedFabricKnitBump,
-    bumpScale: 0.044,
-    roughness: 0.97,
-    metalness: 0.0,
-    side: THREE.DoubleSide,
-  });
-  applyClothWindShader(scarfMat, outdoorWindUniform, 'cloth-wind-inst-v3');
+    // Keep manifest ancestry tone dominant with subtle per-citizen skin variation
+    const manifestCol = new THREE.Color(body.skinHex);
+    const toneCol = new THREE.Color(SKIN_TONES[skinIdx]);
+    manifestCol.lerp(toneCol, 0.25);
 
-  const hairMat = new THREE.MeshStandardMaterial({
-    map: textures.pedHairMap,
-    bumpMap: textures.pedHairBump,
-    bumpScale: 0.017,
-    roughness: 0.42,
-    metalness: 0.06,
-    side: THREE.DoubleSide,
-  });
-  applyClothWindShader(hairMat, outdoorWindUniform, 'cloth-wind-inst-v3');
+    const hairColor =
+      body.ageBand === 'elder' && (ag.voiceSeed & 3) !== 0 ? '#9da0a6' : HAIR_TONES[hairIdx];
 
-  const bootMat = new THREE.MeshStandardMaterial({
-    map: textures.pedFabricLeatherMap,
-    roughnessMap: textures.pedFabricLeatherRoughness,
-    bumpMap: textures.pedFabricLeatherBump,
-    bumpScale: 0.018,
-    roughness: 0.36,
-    metalness: 0.16,
-  });
-  const faceMat = new THREE.MeshStandardMaterial({
-    map: textures.pedFaceStreetCloseMap,
-    bumpMap: textures.pedFaceBump,
-    bumpScale: 0.0092,
-    roughness: 0.44,
-    metalness: 0.02,
-  });
-  const skinMat = new THREE.MeshStandardMaterial({
-    roughness: 0.56,
-    metalness: 0.0,
-  });
-  const hatMat = new THREE.MeshStandardMaterial({
-    roughness: 0.72,
-    metalness: 0.06,
-  });
-  const propMat = new THREE.MeshStandardMaterial({
-    bumpMap: textures.pedClothingBump,
-    bumpScale: 0.016,
-    roughness: 0.64,
-    metalness: 0.08,
-  });
-
-  const propGeo = geos.backpack;
-
-  const mkInst = (geo: THREE.BufferGeometry, mat: THREE.Material) => {
-    const m = new THREE.InstancedMesh(geo, mat, totalCount);
-    m.frustumCulled = false;
-    root.add(m);
-    return m;
+    return {
+      faceId: ag.faceId,
+      fabricId: ag.fabricId,
+      outfitId: ag.outfitId,
+      skinColor: `#${manifestCol.getHexString()}`,
+      hairColor,
+      jacketColor: outfitPal.jacket[jacketIdx],
+      pantsColor: outfitPal.pants[pantsIdx],
+      shoeColor: outfitPal.boots[bootsIdx],
+      scarfColor: SCARF_TONES[scarfIdx],
+      hatColor: outfitPal.hat[hatIdx],
+      propColor: outfitPal.prop[propIdx],
+      hasScarf: ag.hasScarf,
+      usesCap: ag.usesCap,
+      hasProp: ag.hasProp,
+      propKind: usesBriefcase ? 'briefcase' : 'backpack',
+      coatLenScale: ag.coatLenScale,
+      hairStyle: pickHairStyleForAgent(body.gender, ag.usesCap, ag.voiceSeed),
+      weatheredFace: body.ageBand === 'elder' || ag.role === 'gang',
+    };
   };
 
-  const leftThighInst = mkInst(geos.instThigh, pantsMat);
-  const rightThighInst = mkInst(geos.instThigh, pantsMat);
-  const leftShinInst = mkInst(geos.instShin, pantsMat);
-  const rightShinInst = mkInst(geos.instShin, pantsMat);
-  const leftBootInst = mkInst(geos.instShoe, bootMat);
-  const rightBootInst = mkInst(geos.instShoe, bootMat);
-  const hipsInst = mkInst(geos.instPelvis, pantsMat);
-  const coatSkirtInst = mkInst(geos.instCoatSkirt, coatSkirtMat);
-  const torsoInst = mkInst(geos.instTorso, clothMat);
-  const scarfInst = mkInst(geos.instScarf, scarfMat);
-  const leftUpperArmInst = mkInst(geos.instUpperArm, clothMat);
-  const rightUpperArmInst = mkInst(geos.instUpperArm, clothMat);
-  const leftForearmInst = mkInst(geos.instForearm, clothMat);
-  const rightForearmInst = mkInst(geos.instForearm, clothMat);
-  const leftHandInst = mkInst(geos.instHandLeft, skinMat);
-  const rightHandInst = mkInst(geos.instHandRight, skinMat);
-  const headInst = mkInst(geos.instHead, faceMat);
-  const flowHairInst = mkInst(geos.instFlowHair, hairMat);
-  const hatInst = mkInst(geos.instHairCap, hatMat);
-  const propInst = mkInst(propGeo, propMat);
-  const briefcaseInst = mkInst(geos.instBriefcase, propMat);
-
-  const tmpCol = new THREE.Color();
-
-  const applyOutfitColors = () => {
-    for (let i = 0; i < totalCount; i++) {
+  const buildPedRigs = () => {
+    pedRigsRoot.clear();
+    pedRigs.length = 0;
+    pedPoseSynced.fill(0);
+    for (let i = 0; i < agents.length; i++) {
       const ag = agents[i];
-      const pal = CLASS_OUTFITS[ag.civClass];
-      const fParts = ag.faceId.split(':');
-      const cParts = ag.fabricId.split(':');
-      const skinIdx = (Number(fParts[1]) || 0) % SKIN_TONES.length;
-      const hairIdx = (Number(fParts[2]) || 0) % HAIR_TONES.length;
-      const jacketIdx = (Number(cParts[1]) || 0) % pal.jacket.length;
-      const pantsIdx = (Number(cParts[2]) || 0) % pal.pants.length;
-      const bootsIdx = (Number(cParts[3]) || 0) % pal.boots.length;
-      const scarfIdx = (Number(cParts[4]) || 0) % SCARF_TONES.length;
-      const hatIdx = (Number(cParts[5]) || 0) % pal.hat.length;
-      const propIdx = (Number(cParts[6]) || 0) % pal.prop.length;
+      const body = BODY_MANIFEST_MAP.get(ag.bodyId) ?? BODY_POOL_MANIFEST[0];
+      const dressing = buildAgentDressing(ag, body);
+      const rig = createRiggedHuman(
+        (ag.voiceSeed ^ i) | 0,
+        textures,
+        ag.outfitId,
+        'none',
+        ag.bodyId,
+        dressing
+      );
+      rig.root.position.set(ag.x, ag.y, ag.z);
+      rig.root.rotation.set(0, ag.heading, 0);
+      rig.root.visible = ag.alive;
+      pedRigsRoot.add(rig.root);
+      pedRigs.push(rig);
 
-      tmpCol.set(pal.jacket[jacketIdx]);
-      torsoInst.setColorAt(i, tmpCol);
-      coatSkirtInst.setColorAt(i, tmpCol);
-      leftUpperArmInst.setColorAt(i, tmpCol);
-      rightUpperArmInst.setColorAt(i, tmpCol);
-      leftForearmInst.setColorAt(i, tmpCol);
-      rightForearmInst.setColorAt(i, tmpCol);
-
-      tmpCol.set(pal.pants[pantsIdx]);
-      hipsInst.setColorAt(i, tmpCol);
-      leftThighInst.setColorAt(i, tmpCol);
-      rightThighInst.setColorAt(i, tmpCol);
-      leftShinInst.setColorAt(i, tmpCol);
-      rightShinInst.setColorAt(i, tmpCol);
-
-      tmpCol.set(SCARF_TONES[scarfIdx]);
-      scarfInst.setColorAt(i, tmpCol);
-
-      tmpCol.set(pal.boots[bootsIdx]);
-      leftBootInst.setColorAt(i, tmpCol);
-      rightBootInst.setColorAt(i, tmpCol);
-
-      tmpCol.set(SKIN_TONES[skinIdx]);
-      headInst.setColorAt(i, tmpCol);
-      leftHandInst.setColorAt(i, tmpCol);
-      rightHandInst.setColorAt(i, tmpCol);
-
-      tmpCol.set(HAIR_TONES[hairIdx]);
-      flowHairInst.setColorAt(i, tmpCol);
-
-      tmpCol.set(pal.hat[hatIdx]);
-      hatInst.setColorAt(i, tmpCol);
-
-      tmpCol.set(pal.prop[propIdx]);
-      propInst.setColorAt(i, tmpCol);
-      briefcaseInst.setColorAt(i, tmpCol);
-    }
-
-    const meshes = [
-      leftThighInst,
-      rightThighInst,
-      leftShinInst,
-      rightShinInst,
-      leftBootInst,
-      rightBootInst,
-      hipsInst,
-      coatSkirtInst,
-      torsoInst,
-      scarfInst,
-      leftUpperArmInst,
-      rightUpperArmInst,
-      leftForearmInst,
-      rightForearmInst,
-      leftHandInst,
-      rightHandInst,
-      headInst,
-      flowHairInst,
-      hatInst,
-      propInst,
-      briefcaseInst,
-    ];
-    for (let m = 0; m < meshes.length; m++) {
-      if (meshes[m].instanceColor) meshes[m].instanceColor!.needsUpdate = true;
+      if (ag.role === 'gang') {
+        const gv = gangVisuals.get(i);
+        if (gv) {
+          rig.rightHandGrp.add(gv.weapon);
+          gv.weapon.visible = ag.alive;
+        }
+      }
     }
   };
 
-  applyOutfitColors();
+  buildPedRigs();
 
-  // Zero-GC reusable transform objects
-  const dummy = new THREE.Object3D();
-
-  const setPart = (
-    inst: THREE.InstancedMesh,
-    idx: number,
-    px: number,
-    py: number,
-    pz: number,
-    rx: number,
-    ry: number,
-    rz: number,
-    sx: number,
-    sy: number,
-    sz: number
-  ) => {
-    dummy.position.set(px, py, pz);
-    dummy.rotation.set(rx, ry, rz, 'YXZ');
-    dummy.scale.set(sx, sy, sz);
-    dummy.updateMatrix();
-    inst.setMatrixAt(idx, dummy.matrix);
+  const pedPoseParams: HumanPoseParams = {
+    mode: 'standing_idle',
+    elapsed: 0,
+    phase: 0,
+    walkCycle: 0,
+    windStrength: 0.88,
+    sidestepYaw: 0,
+    nodPitch: 0,
+    upsetProgress: 0,
+    upsetLookYaw: 0,
+    weaponPose: undefined,
   };
 
   const walkingFlags = new Uint8Array(Math.max(1, totalCount));
@@ -1669,13 +1663,13 @@ export function buildPedestrianSystem(
                   ag.burstShotsLeft--;
                   ag.burstShotTimer = 1 / SHARED_WEAPON_SPEC.fireRateHz;
 
-                  const eyeY = ag.y + 1.44 * ag.heightScale;
+                  const eyeY = ag.y + ag.eyeHeightM;
                   _shotOrigin.set(ag.x, eyeY, ag.z);
                   const sinH = Math.sin(ag.heading);
                   const cosH = Math.cos(ag.heading);
                   _shotMuzzle.set(
                     ag.x + sinH * 0.72 - cosH * 0.18,
-                    ag.y + 1.38 * ag.heightScale,
+                    ag.y + ag.eyeHeightM * 0.94,
                     ag.z + cosH * 0.72 + sinH * 0.18
                   );
                   _shotDir.set(
@@ -1949,31 +1943,16 @@ export function buildPedestrianSystem(
     resolveSeparationAndSocial(safeDt, 0, playerPos);
     resolveSeparationAndSocial(safeDt, 1, playerPos);
 
+    frameCounter++;
+    const hasPlayer = Boolean(playerPos);
+    const px = playerPos ? playerPos.x : 0;
+    const pz = playerPos ? playerPos.z : 0;
+
     for (let i = 0; i < totalCount; i++) {
       const ag = agents[i];
+      const rig = pedRigs[i];
       if (!ag.alive) {
-        // Hide dead NPC parts underground and hide gang weapon/sprite
-        setPart(leftThighInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(rightThighInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(leftShinInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(rightShinInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(leftBootInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(rightBootInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(hipsInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(coatSkirtInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(torsoInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(scarfInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(leftUpperArmInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(rightUpperArmInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(leftForearmInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(rightForearmInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(leftHandInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(rightHandInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(headInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(flowHairInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(hatInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(propInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(briefcaseInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
+        if (rig) rig.root.visible = false;
         const gv = gangVisuals.get(i);
         if (gv) {
           gv.weapon.visible = false;
@@ -1981,327 +1960,71 @@ export function buildPedestrianSystem(
         }
         continue;
       }
+
       ag.sidestepYaw = THREE.MathUtils.damp(ag.sidestepYaw, ag.targetSidestep, 9.5, safeDt);
       const isWalking = walkingFlags[i] === 1;
-
       if (isWalking) {
         ag.stridePhase += safeDt * ag.speed * 5.2;
       }
 
-      const h = ag.heightScale;
-      const b = ag.buildScale;
-      const sinH = Math.sin(ag.heading);
-      const cosH = Math.cos(ag.heading);
-      const rightX = -cosH;
-      const rightZ = sinH;
+      if (!rig) continue;
+      rig.root.visible = true;
+      rig.root.position.set(ag.x, ag.y, ag.z);
+      rig.root.rotation.set(0, ag.heading, 0);
 
-      const stride = isWalking ? Math.tanh(Math.sin(ag.stridePhase) * 1.18) : 0;
-      const cosStride = isWalking ? Math.cos(ag.stridePhase) : 0;
-      const idleShift = isWalking
-        ? 0
-        : Math.tanh(Math.sin(elapsed * 0.26 + ag.idlePhase) * 1.9) * 0.85;
-      const lIdleRelax = Math.max(0, idleShift);
-      const rIdleRelax = Math.max(0, -idleShift);
-      const bob = isWalking
-        ? Math.abs(stride) * 0.032 * h
-        : Math.sin(elapsed * 1.85 + ag.idlePhase) * 0.008 * h - Math.abs(idleShift) * 0.012 * h;
-
-      const windGust =
-        (0.55 + 0.45 * Math.sin(elapsed * 1.4 + ag.idlePhase)) *
-        (Math.sin(elapsed * 4.5 + ag.idlePhase * 1.7) * 0.65 +
-          Math.sin(elapsed * 9.2 + ag.idlePhase * 2.5) * 0.35);
-
-      const lThighX = isWalking ? -stride * 0.50 : -0.02 - lIdleRelax * 0.11;
-      const rThighX = isWalking ? stride * 0.50 : -0.02 - rIdleRelax * 0.11;
-      const lKneeBend = isWalking
-        ? Math.max(0.05, (cosStride * 0.5 + 0.5) * 0.64)
-        : 0.04 + lIdleRelax * 0.21;
-      const rKneeBend = isWalking
-        ? Math.max(0.05, (-cosStride * 0.5 + 0.5) * 0.64)
-        : 0.04 + rIdleRelax * 0.21;
-      const lShinX = lThighX + lKneeBend;
-      const rShinX = rThighX + rKneeBend;
-
-      const upsetFrac = ag.upsetTimer > 0 ? Math.sin(Math.min(1, ag.upsetTimer / 2.5) * Math.PI) : 0;
-      const upsetWave = ag.upsetTimer > 0 ? Math.sin(elapsed * 12.5 + ag.idlePhase) * 0.26 * upsetFrac : 0;
-
-      const lArmX =
-        ag.upsetTimer > 0
-          ? -0.78 * upsetFrac + upsetWave * 0.55
-          : isWalking
-          ? stride * 0.40
-          : -0.04 + Math.sin(elapsed * 1.85 + ag.idlePhase) * 0.025;
-      const rArmX = isWalking ? -stride * 0.40 : -0.06 - Math.sin(elapsed * 1.85 + ag.idlePhase) * 0.02;
-      const lForearmX =
-        ag.upsetTimer > 0
-          ? -1.42 * upsetFrac + upsetWave
-          : lArmX - 0.22 - Math.max(0, -lArmX) * 0.46;
-      const rForearmX = rArmX - 0.24 - Math.max(0, -rArmX) * 0.46;
-
-      // Head glare toward bumper when upset, or polite nod on passing
-      let headYaw = ag.heading;
-      let headPitch = 0;
-      if (ag.upsetTimer > 0) {
-        let glareDelta = ((ag.upsetLookYaw - ag.heading + Math.PI) % (Math.PI * 2)) - Math.PI;
-        if (glareDelta < -Math.PI) glareDelta += Math.PI * 2;
-        headYaw = ag.heading + THREE.MathUtils.clamp(glareDelta, -1.15, 1.15) * Math.min(1, upsetFrac * 1.4);
-        headPitch = -0.08 * upsetFrac; // chin tucked glare
-      } else {
-        const headLook = isWalking
-          ? Math.tanh(Math.sin(elapsed * 0.42 + ag.idlePhase) * 1.8) * 0.10
-          : Math.tanh(Math.sin(elapsed * 0.36 + ag.idlePhase) * 2.2) * 0.30;
-        headYaw = ag.heading + headLook + ag.sidestepYaw * 0.35;
-        if (ag.nodTimer > 0) {
-          const nodU = 1 - ag.nodTimer / 0.7;
-          headPitch = Math.sin(nodU * Math.PI) * 0.24;
+      const attachedNow = Boolean(rig.root.userData._mpfbAdapter);
+      const needsInitPose = pedPoseSynced[i] === 0 || (attachedNow && pedPoseSynced[i] < 2);
+      let shouldPose = needsInitPose || !hasPlayer;
+      if (!shouldPose) {
+        const dx = ag.x - px;
+        const dz = ag.z - pz;
+        const d2 = dx * dx + dz * dz;
+        if (d2 < 52 * 52) {
+          shouldPose = true;
+        } else if (d2 < 115 * 115) {
+          shouldPose = (frameCounter + i) % 3 === 0;
+        } else {
+          shouldPose = (frameCounter + i) % 8 === 0;
         }
       }
 
-      const torsoYaw = ag.heading - stride * 0.09 + idleShift * 0.03 + ag.sidestepYaw;
-
-      const baseY = ag.y + bob;
-      const hipY = baseY + 0.89 * h;
-      const hipShiftX = rightX * (idleShift * 0.024 * b);
-      const hipShiftZ = rightZ * (idleShift * 0.024 * b);
-      const legOff = 0.098 * b;
-      const armOff = 0.198 * b;
-      const thighLen = 0.425 * h;
-      const shinLen = 0.415 * h;
-      const uArmLen = 0.285 * h;
-
-      // Articulated Left & Right Thighs
-      setPart(leftThighInst, i, ag.x - rightX * legOff, hipY, ag.z - rightZ * legOff, lThighX, ag.heading, 0, b, h, b);
-      setPart(rightThighInst, i, ag.x + rightX * legOff, hipY, ag.z + rightZ * legOff, rThighX, ag.heading, 0, b, h, b);
-
-      // Articulated Left & Right Calves/Shins
-      const lKneeFwd = -Math.sin(lThighX) * thighLen;
-      const lKneeY = hipY - Math.cos(lThighX) * thighLen;
-      const rKneeFwd = -Math.sin(rThighX) * thighLen;
-      const rKneeY = hipY - Math.cos(rThighX) * thighLen;
-
-      setPart(
-        leftShinInst,
-        i,
-        ag.x - rightX * legOff + sinH * lKneeFwd,
-        lKneeY,
-        ag.z - rightZ * legOff + cosH * lKneeFwd,
-        lShinX,
-        ag.heading,
-        0,
-        b,
-        h,
-        b
-      );
-      setPart(
-        rightShinInst,
-        i,
-        ag.x + rightX * legOff + sinH * rKneeFwd,
-        rKneeY,
-        ag.z + rightZ * legOff + cosH * rKneeFwd,
-        rShinX,
-        ag.heading,
-        0,
-        b,
-        h,
-        b
-      );
-
-      // Shoes
-      const lAnkFwd = lKneeFwd - Math.sin(lShinX) * shinLen;
-      const lAnkY = Math.max(ag.y, lKneeY - Math.cos(lShinX) * shinLen - 0.04 * h);
-      const rAnkFwd = rKneeFwd - Math.sin(rShinX) * shinLen;
-      const rAnkY = Math.max(ag.y, rKneeY - Math.cos(rShinX) * shinLen - 0.04 * h);
-
-      setPart(
-        leftBootInst,
-        i,
-        ag.x - rightX * legOff + sinH * lAnkFwd,
-        lAnkY,
-        ag.z - rightZ * legOff + cosH * lAnkFwd,
-        lShinX * 0.28,
-        ag.heading,
-        0,
-        b,
-        h,
-        b
-      );
-      setPart(
-        rightBootInst,
-        i,
-        ag.x + rightX * legOff + sinH * rAnkFwd,
-        rAnkY,
-        ag.z + rightZ * legOff + cosH * rAnkFwd,
-        rShinX * 0.28,
-        ag.heading,
-        0,
-        b,
-        h,
-        b
-      );
-
-      const bodyX = ag.x + hipShiftX;
-      const bodyZ = ag.z + hipShiftZ;
-      setPart(hipsInst, i, bodyX, baseY + 0.92 * h, bodyZ, 0, ag.heading, -idleShift * 0.035, b, h, b);
-      setPart(
-        coatSkirtInst,
-        i,
-        bodyX,
-        baseY + 1.02 * h,
-        bodyZ,
-        0.09 + Math.abs(stride) * 0.1 + windGust * 0.14,
-        torsoYaw,
-        windGust * 0.18 - idleShift * 0.025,
-        b * 1.04,
-        h * ag.coatLenScale,
-        b * 1.04
-      );
-
-      setPart(
-        torsoInst,
-        i,
-        bodyX,
-        baseY + 1.01 * h,
-        bodyZ,
-        isWalking ? 0.045 : 0.012,
-        torsoYaw,
-        idleShift * 0.028,
-        b,
-        h,
-        b
-      );
-      if (ag.hasScarf) {
-        setPart(
-          scarfInst,
-          i,
-          bodyX,
-          baseY + 1.495 * h,
-          bodyZ,
-          0.02 + Math.abs(windGust) * 0.12,
-          torsoYaw,
-          windGust * 0.16,
-          b * 1.02,
-          h,
-          b * 1.02
-        );
-      } else {
-        setPart(scarfInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-      }
-
-      const sinT = Math.sin(torsoYaw);
-      const cosT = Math.cos(torsoYaw);
-      const rightTX = -cosT;
-      const rightTZ = sinT;
-
-      const isCarryingBriefcase =
-        ag.hasProp &&
-        ag.civClass !== 'streetwear_youth' &&
-        ag.civClass !== 'student_runner';
       const isGang = ag.role === 'gang';
-      const rArmFinalX = isGang
-        ? ag.aiming
-          ? -1.24
-          : -0.36
-        : isCarryingBriefcase
-        ? rArmX * 0.25 + 0.05
-        : rArmX;
-      const rForearmFinalX = isGang
-        ? ag.aiming
-          ? -1.56
-          : -0.82
-        : isCarryingBriefcase
-        ? rArmFinalX - 0.12
-        : rForearmX;
+      if (shouldPose) {
+        pedPoseSynced[i] = attachedNow ? 2 : 1;
+        const upsetFrac = ag.upsetTimer > 0 ? Math.sin(Math.min(1, ag.upsetTimer / 2.5) * Math.PI) : 0;
+        let glareDelta = 0;
+        if (ag.upsetTimer > 0) {
+          glareDelta = ((ag.upsetLookYaw - ag.heading + Math.PI) % (Math.PI * 2)) - Math.PI;
+          if (glareDelta < -Math.PI) glareDelta += Math.PI * 2;
+        }
+        const nodU = ag.nodTimer > 0 ? 1 - ag.nodTimer / 0.7 : 0;
 
-      const shoulderY = baseY + 1.43 * h;
-      setPart(
-        leftUpperArmInst,
-        i,
-        bodyX - rightTX * armOff,
-        shoulderY,
-        bodyZ - rightTZ * armOff,
-        lArmX,
-        torsoYaw,
-        0.048,
-        b,
-        h,
-        b
-      );
-      setPart(
-        rightUpperArmInst,
-        i,
-        bodyX + rightTX * armOff,
-        shoulderY,
-        bodyZ + rightTZ * armOff,
-        rArmFinalX,
-        torsoYaw,
-        -0.048,
-        b,
-        h,
-        b
-      );
-
-      const lElbFwd = -Math.sin(lArmX) * uArmLen;
-      const lElbY = shoulderY - Math.cos(lArmX) * uArmLen;
-      const rElbFwd = -Math.sin(rArmFinalX) * uArmLen;
-      const rElbY = shoulderY - Math.cos(rArmFinalX) * uArmLen;
-
-      setPart(
-        leftForearmInst,
-        i,
-        bodyX - rightTX * (armOff + 0.012 * b) + sinT * lElbFwd,
-        lElbY,
-        bodyZ - rightTZ * (armOff + 0.012 * b) + cosT * lElbFwd,
-        lForearmX,
-        torsoYaw,
-        0.025,
-        b,
-        h,
-        b
-      );
-      setPart(
-        rightForearmInst,
-        i,
-        bodyX + rightTX * (armOff + 0.012 * b) + sinT * rElbFwd,
-        rElbY,
-        bodyZ + rightTZ * (armOff + 0.012 * b) + cosT * rElbFwd,
-        rForearmFinalX,
-        torsoYaw,
-        -0.025,
-        b,
-        h,
-        b
-      );
-
-      const fArmLen = 0.255 * h;
-      const lHandFwd = lElbFwd - Math.sin(lForearmX) * fArmLen;
-      const lHandY = lElbY - Math.cos(lForearmX) * fArmLen;
-      const lHandX = bodyX - rightTX * (armOff + 0.016 * b) + sinT * lHandFwd;
-      const lHandZ = bodyZ - rightTZ * (armOff + 0.016 * b) + cosT * lHandFwd;
-
-      const rHandFwd = rElbFwd - Math.sin(rForearmFinalX) * fArmLen;
-      const rHandY = rElbY - Math.cos(rForearmFinalX) * fArmLen;
-      const rHandX = bodyX + rightTX * (armOff + 0.016 * b) + sinT * rHandFwd;
-      const rHandZ = bodyZ + rightTZ * (armOff + 0.016 * b) + cosT * rHandFwd;
-
-      setPart(leftHandInst, i, lHandX, lHandY, lHandZ, lForearmX, torsoYaw, 0.04, h, h, h);
-      setPart(rightHandInst, i, rHandX, rHandY, rHandZ, rForearmFinalX, torsoYaw, -0.04, h, h, h);
+        pedPoseParams.mode = isWalking ? 'walking' : 'standing_idle';
+        pedPoseParams.elapsed = elapsed;
+        pedPoseParams.phase = ag.idlePhase;
+        pedPoseParams.walkCycle = ag.stridePhase;
+        pedPoseParams.windStrength = 0.88;
+        pedPoseParams.sidestepYaw = ag.sidestepYaw;
+        pedPoseParams.nodPitch = ag.nodTimer > 0 ? Math.sin(nodU * Math.PI) * 0.24 : 0;
+        pedPoseParams.upsetProgress = upsetFrac;
+        pedPoseParams.upsetLookYaw = glareDelta;
+        pedPoseParams.weaponPose = isGang ? (ag.aiming ? 'aim' : 'ready') : undefined;
+        applyHumanPose(rig, pedPoseParams);
+      }
 
       // Sync gang member's shared weapon & filling "?" suspicion sprite above head
       if (isGang) {
         const gv = gangVisuals.get(i);
         if (gv) {
           gv.weapon.visible = true;
-          gv.weapon.position.set(rHandX, rHandY + 0.015 * h, rHandZ);
-          gv.weapon.rotation.set(rForearmFinalX + Math.PI * 0.5, torsoYaw, 0, 'YXZ');
-
           const crew = crews[ag.crewIdx];
           if (ag.alertBannerTimer > 0 && crew?.state === 'alert') {
             gv.suspicionSprite.visible = true;
-            gv.suspicionSprite.position.set(bodyX, baseY + 2.08 * h, bodyZ);
+            gv.suspicionSprite.position.set(ag.x, ag.y + ag.heightM + 0.34, ag.z);
             (gv.suspicionSprite.material as THREE.SpriteMaterial).map = alertBang;
           } else if (ag.suspicion > 0.02 && crew?.state !== 'alert') {
             gv.suspicionSprite.visible = true;
-            gv.suspicionSprite.position.set(bodyX, baseY + 2.08 * h, bodyZ);
+            gv.suspicionSprite.position.set(ag.x, ag.y + ag.heightM + 0.34, ag.z);
             const stepIdx = Math.min(
               questionSteps.length - 1,
               Math.max(0, Math.round(ag.suspicion * (questionSteps.length - 1)))
@@ -2312,80 +2035,7 @@ export function buildPedestrianSystem(
           }
         }
       }
-
-      const headY = baseY + 1.59 * h;
-      setPart(headInst, i, bodyX, headY, bodyZ, headPitch, headYaw, -idleShift * 0.025, h, h, h);
-      if (ag.usesCap) {
-        setPart(hatInst, i, bodyX, headY, bodyZ, headPitch, headYaw, -idleShift * 0.025, h * 1.03, h * 1.04, h * 1.03);
-        setPart(flowHairInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-      } else {
-        setPart(
-          flowHairInst,
-          i,
-          bodyX,
-          headY,
-          bodyZ,
-          headPitch,
-          headYaw,
-          -idleShift * 0.025,
-          h,
-          h * ag.hairFlowScale,
-          h
-        );
-        setPart(hatInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-      }
-
-      if (ag.hasProp) {
-        if (!isCarryingBriefcase) {
-          setPart(
-            propInst,
-            i,
-            bodyX - sinT * 0.148 * b,
-            baseY + 1.29 * h,
-            bodyZ - cosT * 0.148 * b,
-            0.03,
-            torsoYaw,
-            idleShift * 0.024,
-            1.02 * b,
-            1.02 * h,
-            1.0 * b
-          );
-          setPart(briefcaseInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        } else {
-          const gripDrop = 0.088 * h;
-          const bX = rHandX + sinT * (-Math.sin(rForearmFinalX) * gripDrop);
-          const bY = rHandY - Math.cos(rForearmFinalX) * gripDrop;
-          const bZ = rHandZ + cosT * (-Math.sin(rForearmFinalX) * gripDrop);
-          setPart(briefcaseInst, i, bX, bY, bZ, rArmFinalX * 0.35, torsoYaw, 0, h, h, h);
-          setPart(propInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        }
-      } else {
-        setPart(propInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-        setPart(briefcaseInst, i, 0, -100, 0, 0, 0, 0, 0.001, 0.001, 0.001);
-      }
     }
-
-    leftThighInst.instanceMatrix.needsUpdate = true;
-    rightThighInst.instanceMatrix.needsUpdate = true;
-    leftShinInst.instanceMatrix.needsUpdate = true;
-    rightShinInst.instanceMatrix.needsUpdate = true;
-    leftBootInst.instanceMatrix.needsUpdate = true;
-    rightBootInst.instanceMatrix.needsUpdate = true;
-    hipsInst.instanceMatrix.needsUpdate = true;
-    coatSkirtInst.instanceMatrix.needsUpdate = true;
-    torsoInst.instanceMatrix.needsUpdate = true;
-    scarfInst.instanceMatrix.needsUpdate = true;
-    leftUpperArmInst.instanceMatrix.needsUpdate = true;
-    rightUpperArmInst.instanceMatrix.needsUpdate = true;
-    leftForearmInst.instanceMatrix.needsUpdate = true;
-    rightForearmInst.instanceMatrix.needsUpdate = true;
-    leftHandInst.instanceMatrix.needsUpdate = true;
-    rightHandInst.instanceMatrix.needsUpdate = true;
-    headInst.instanceMatrix.needsUpdate = true;
-    flowHairInst.instanceMatrix.needsUpdate = true;
-    hatInst.instanceMatrix.needsUpdate = true;
-    propInst.instanceMatrix.needsUpdate = true;
-    briefcaseInst.instanceMatrix.needsUpdate = true;
   };
 
   const reseed = (newSeed?: number) => {
@@ -2395,7 +2045,7 @@ export function buildPedestrianSystem(
         : ((Date.now() ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0);
     rng = mulberry32(seed);
     spawnAgents();
-    applyOutfitColors();
+    buildPedRigs();
   };
 
   const getRayTargets = (origin: THREE.Vector3, radiusM: number): FpsRayTarget[] => {
@@ -2409,7 +2059,7 @@ export function buildPedestrianSystem(
       const dz = ag.z - origin.z;
       if (dx * dx + dy * dy + dz * dz > r2) continue;
       const hr = PED_CAPSULE_RADIUS;
-      const height = 1.72 * ag.heightScale;
+      const height = ag.heightM;
       const box = new THREE.Box3(
         new THREE.Vector3(ag.x - hr, ag.y, ag.z - hr),
         new THREE.Vector3(ag.x + hr, ag.y + height, ag.z + hr)
