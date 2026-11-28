@@ -29,11 +29,22 @@ import {
   preloadHumanBodyPool,
 } from './humanCharacter';
 import {
-  createSharedWeaponMesh,
   fireSharedWeapon,
-  SHARED_WEAPON_SPEC,
+  getSharedWeaponSpec,
   SharedWeaponFxPool,
+  type SharedWeaponId,
 } from './sharedWeapon';
+import {
+  attachWeaponToHumanRig,
+  applyWeaponHoldPose,
+  getEnemyWeaponClassProfile,
+  getEnemyWeaponIdForClass,
+  MuzzleFlashLightPool,
+  type EnemyWeaponClass,
+  type EnemyWeaponId,
+  type EnemyWeaponState,
+  type NpcWeaponRig,
+} from './enemyWeapons';
 import { worldEventBus } from './worldEventBus';
 
 const PED_CAPSULE_RADIUS = 0.34;
@@ -131,6 +142,17 @@ export interface PedAgent {
   burstShotsLeft: number;
   burstShotTimer: number;
   aiming: boolean;
+  // NPC weapon state on the new bodies (port from muse/weapons-lab-trace)
+  weaponClass: EnemyWeaponClass;
+  weaponId: EnemyWeaponId;
+  weaponState: EnemyWeaponState;
+  ammoInMag: number;
+  reloadTimer: number;
+  drawFrac: number;
+  lastShotElapsed: number;
+  hadFireLos: boolean;
+  aimPitch: number;
+  weaponFired: boolean;
 }
 
 export interface PedPlayerContext {
@@ -573,10 +595,16 @@ export function buildPedestrianSystem(
 
   const weaponFxPool = new SharedWeaponFxPool(24);
   root.add(weaponFxPool.root);
+  const muzzleLightPool = new MuzzleFlashLightPool(6);
+  root.add(muzzleLightPool.root);
   const { questionSteps, alertBang } = getSuspicionTextures();
   const gangVisuals = new Map<
     number,
-    { weapon: THREE.Group; suspicionSprite: THREE.Sprite }
+    {
+      weapon: THREE.Group | null;
+      weaponRig: NpcWeaponRig | null;
+      suspicionSprite: THREE.Sprite;
+    }
   >();
 
   const spawnAgents = () => {
@@ -700,6 +728,16 @@ export function buildPedestrianSystem(
         burstShotsLeft: 0,
         burstShotTimer: 0,
         aiming: false,
+        weaponClass: 'gang',
+        weaponId: 'service_carbine',
+        weaponState: 'patrol',
+        ammoInMag: 30,
+        reloadTimer: 0,
+        drawFrac: 0,
+        lastShotElapsed: -99,
+        hadFireLos: false,
+        aimPitch: 0,
+        weaponFired: false,
       };
     };
 
@@ -835,7 +873,7 @@ export function buildPedestrianSystem(
     // 5. 2059 RUSSIA GANG CREWS (Crews of 3-5 in D8 Black Market Quay & D1 Nightlife)
     crews.length = 0;
     gangVisuals.forEach((v) => {
-      v.weapon.parent?.remove(v.weapon);
+      if (v.weapon) v.weapon.parent?.remove(v.weapon);
       root.remove(v.suspicionSprite);
     });
     gangVisuals.clear();
@@ -849,6 +887,21 @@ export function buildPedestrianSystem(
         const rad = 2.0 + (m % 2) * 1.4;
         ag.crewIdx = cIdx;
         ag.memberSlot = m;
+        // Weapon class by crew slot (trace spec): lead = mob enforcer
+        // (full-auto), then heavy (pump shotgun), guard (service carbine),
+        // brute (pump shotgun), remaining members gang (service carbine).
+        ag.weaponClass =
+          m === 0
+            ? 'enforcer'
+            : m === 1
+            ? 'heavy'
+            : m === 2
+            ? 'guard'
+            : m === 3
+            ? 'brute'
+            : 'gang';
+        ag.weaponId = getEnemyWeaponIdForClass(ag.weaponClass);
+        ag.ammoInMag = getSharedWeaponSpec(ag.weaponId as SharedWeaponId).magazineSize;
         ag.formOffX = Math.cos(angle) * rad;
         ag.formOffZ = Math.sin(angle) * rad;
         ag.x = terr.anchorX + ag.formOffX;
@@ -864,10 +917,9 @@ export function buildPedestrianSystem(
         agents.push(ag);
         memberIndices.push(idx);
 
-        // Shared weapon in hand + filling "?" suspicion sprite above head
-        const weapon = createSharedWeaponMesh(0.95);
-        weapon.position.set(0.0, -0.055, 0.025);
-        weapon.rotation.set(Math.PI * 0.5, 0, 0);
+        // Filling "?" suspicion sprite above head. The member's weapon —
+        // a black enemy variation with red charging LED — is attached at
+        // rig build (see buildPedRigs / attachWeaponToHumanRig).
         const spriteMat = new THREE.SpriteMaterial({
           map: questionSteps[0],
           transparent: true,
@@ -879,7 +931,7 @@ export function buildPedestrianSystem(
         suspicionSprite.visible = false;
         suspicionSprite.renderOrder = 10;
         root.add(suspicionSprite);
-        gangVisuals.set(idx, { weapon, suspicionSprite });
+        gangVisuals.set(idx, { weapon: null, weaponRig: null, suspicionSprite });
       }
       crews.push({
         id: terr.id,
@@ -1009,7 +1061,12 @@ export function buildPedestrianSystem(
       if (ag.role === 'gang') {
         const gv = gangVisuals.get(i);
         if (gv) {
-          rig.rightHandGrp.add(gv.weapon);
+          // Attach the class weapon (black enemy variation, red charging
+          // LED) on its IK grip pivot; the weapon-hold pose layer drives
+          // it every posed frame from the agent's weapon state.
+          const weaponRig = attachWeaponToHumanRig(rig, ag.weaponClass);
+          gv.weaponRig = weaponRig;
+          gv.weapon = weaponRig.visual.root;
           gv.weapon.visible = ag.alive;
         }
       }
@@ -1347,6 +1404,7 @@ export function buildPedestrianSystem(
   ) => {
     const safeDt = Math.min(0.05, Math.max(0.0005, dt));
     weaponFxPool.update(safeDt);
+    muzzleLightPool.update(safeDt);
 
     const playerCtx: PedPlayerContext | undefined =
       playerPosOrCtx instanceof THREE.Vector3
@@ -1426,6 +1484,13 @@ export function buildPedestrianSystem(
             ag.z = crew.homeAnchorZ + ag.formOffZ;
             ag.suspicion = 0;
             ag.alertBannerTimer = 0;
+            // Respawn with a fresh magazine and the weapon back at carry
+            ag.ammoInMag = getSharedWeaponSpec(ag.weaponId as SharedWeaponId).magazineSize;
+            ag.weaponState = 'patrol';
+            ag.reloadTimer = 0;
+            ag.drawFrac = 0;
+            ag.burstShotsLeft = 0;
+            ag.aiming = false;
           }
           continue;
         }
@@ -1645,73 +1710,159 @@ export function buildPedestrianSystem(
           const groundY = Math.max(0.08, getTerrainHeight(ag.x, ag.z));
           ag.y = crew.districtId === 'D8' && ag.x > 1560 ? Math.max(groundY, 1.52) : groundY;
 
-          // Face player & fire shared weapon during alert chase!
+          // === NPC WEAPON STATES ON THE NEW BODIES (port) ===
+          // The agent's class arsenal spec + handling profile drive
+          // reloads, sustained full-auto, burst discipline and draw gating.
+          const wSpec = getSharedWeaponSpec(ag.weaponId as SharedWeaponId);
+          const wProf = getEnemyWeaponClassProfile(ag.weaponClass);
+          ag.hadFireLos = false;
+
+          // Tick active reload (duration strictly equals wSpec.reloadSec)
+          if (ag.reloadTimer > 0) {
+            ag.reloadTimer = Math.max(0, ag.reloadTimer - safeDt);
+            if (ag.reloadTimer === 0) {
+              ag.ammoInMag = wSpec.magazineSize;
+            }
+          }
+
+          // Draw gate: the weapon comes up when the crew is alert or
+          // searching, or suspicion is already high; otherwise it settles.
+          const drawTarget =
+            crew.state === 'alert' || crew.state === 'search' || ag.suspicion > 0.28 ? 1 : 0;
+          ag.drawFrac = THREE.MathUtils.damp(ag.drawFrac, drawTarget, wProf.blendRate, safeDt);
+
+          // Face player & fire the class arsenal during alert chase!
           if (crew.state === 'alert' && playerPos) {
             const toPx = playerPos.x - ag.x;
             const toPz = playerPos.z - ag.z;
             const pDist = Math.hypot(toPx, toPz);
             const hasLos =
-              pDist < 32 &&
+              pDist < Math.min(34, wSpec.rangeM) &&
               (!collisionWorld || collisionWorld.hasLineOfSight(ag.x, ag.z, playerPos.x, playerPos.z));
             if (hasLos) {
+              ag.hadFireLos = true;
               ag.heading = Math.atan2(toPx, toPz);
-              ag.aiming = true;
+              const eyeY = ag.y + ag.eyeHeightM;
+              const desiredPitch = THREE.MathUtils.clamp(
+                Math.atan2(playerPos.y + 1.15 - eyeY, Math.max(0.5, pDist)),
+                -0.55,
+                0.55
+              );
+              ag.aimPitch = THREE.MathUtils.damp(ag.aimPitch, desiredPitch, 12.0, safeDt);
 
-              if (ag.burstShotsLeft > 0) {
-                ag.burstShotTimer -= safeDt;
-                if (ag.burstShotTimer <= 0) {
-                  ag.burstShotsLeft--;
-                  ag.burstShotTimer = 1 / SHARED_WEAPON_SPEC.fireRateHz;
+              if (ag.reloadTimer <= 0) {
+                if (ag.ammoInMag <= 0) {
+                  ag.reloadTimer = wSpec.reloadSec;
+                  ag.burstShotsLeft = 0;
+                } else {
+                  ag.aiming = true;
 
-                  const eyeY = ag.y + ag.eyeHeightM;
-                  _shotOrigin.set(ag.x, eyeY, ag.z);
-                  const sinH = Math.sin(ag.heading);
-                  const cosH = Math.cos(ag.heading);
-                  _shotMuzzle.set(
-                    ag.x + sinH * 0.72 - cosH * 0.18,
-                    ag.y + ag.eyeHeightM * 0.94,
-                    ag.z + cosH * 0.72 + sinH * 0.18
-                  );
-                  _shotDir.set(
-                    playerPos.x - ag.x,
-                    playerPos.y + 1.15 - eyeY,
-                    playerPos.z - ag.z
-                  );
-
-                  const hit = fireSharedWeapon({
-                    origin: _shotOrigin,
-                    muzzleWorld: _shotMuzzle,
-                    dir: _shotDir,
-                    shooterKind: 'gang',
-                    shooterId: ag.id,
-                    spreadRad: SHARED_WEAPON_SPEC.npcSpreadRad,
-                    rayTargets: [],
-                    collisionWorld,
-                    playerHitBox: _playerHitBox,
-                    fxPool: weaponFxPool,
-                    districtId: crew.districtId,
-                    onSound: playerCtx?.onGunshotSound,
-                    listenerPos: _playerPosVec,
-                  });
-                  if (hit.hit && hit.kind === 'player' && playerCtx?.onPlayerHit) {
-                    playerCtx.onPlayerHit(playerCtx.inVehicle ? hit.damage * 0.22 : hit.damage * 0.45);
+                  // Sustained full-auto fires continuously until the mag is dry
+                  if (wSpec.sustainedFire && ag.burstShotsLeft <= 0) {
+                    ag.burstShotsLeft = ag.ammoInMag;
+                    ag.burstCooldown = 0;
                   }
-                }
-              } else {
-                ag.burstCooldown -= safeDt;
-                if (ag.burstCooldown <= 0) {
-                  ag.burstShotsLeft = SHARED_WEAPON_SPEC.burstCount;
-                  ag.burstShotTimer = 0;
-                  ag.burstCooldown =
-                    Math.max(0.45, SHARED_WEAPON_SPEC.burstCooldownSec - hiddenHeat * 0.004) +
-                    (ag.memberSlot % 3) * 0.18;
+
+                  if (ag.burstShotsLeft > 0) {
+                    ag.burstShotTimer -= safeDt;
+                    if (ag.burstShotTimer <= 0) {
+                      ag.burstShotsLeft--;
+                      ag.ammoInMag--;
+                      ag.burstShotTimer = 1 / wSpec.fireRateHz;
+                      ag.lastShotElapsed = elapsed;
+                      ag.weaponFired = true;
+
+                      _shotOrigin.set(ag.x, eyeY, ag.z);
+                      const sinH = Math.sin(ag.heading);
+                      const cosH = Math.cos(ag.heading);
+                      _shotMuzzle.set(
+                        ag.x + sinH * 0.72 - cosH * 0.18,
+                        ag.y + ag.eyeHeightM * 0.94,
+                        ag.z + cosH * 0.72 + sinH * 0.18
+                      );
+                      _shotDir.set(
+                        playerPos.x - ag.x,
+                        playerPos.y + 1.15 - eyeY,
+                        playerPos.z - ag.z
+                      );
+
+                      const hit = fireSharedWeapon({
+                        weaponId: ag.weaponId as SharedWeaponId,
+                        origin: _shotOrigin,
+                        muzzleWorld: _shotMuzzle,
+                        dir: _shotDir,
+                        shooterKind: 'gang',
+                        shooterId: ag.id,
+                        spreadRad: wSpec.npcSpreadRad,
+                        rayTargets: [],
+                        collisionWorld,
+                        playerHitBox: _playerHitBox,
+                        fxPool: weaponFxPool,
+                        districtId: crew.districtId,
+                        onSound: playerCtx?.onGunshotSound,
+                        listenerPos: _playerPosVec,
+                      });
+                      if (hit.hit && hit.kind === 'player' && playerCtx?.onPlayerHit) {
+                        playerCtx.onPlayerHit(playerCtx.inVehicle ? hit.damage * 0.22 : hit.damage * 0.45);
+                      }
+                      if (ag.ammoInMag <= 0) {
+                        ag.reloadTimer = wSpec.reloadSec;
+                        ag.burstShotsLeft = 0;
+                      }
+                    }
+                  } else {
+                    ag.burstCooldown -= safeDt;
+                    if (ag.burstCooldown <= 0) {
+                      ag.burstShotsLeft = wSpec.burstCount;
+                      ag.burstShotTimer = 0;
+                      ag.burstCooldown =
+                        Math.max(0.45, wSpec.burstCooldownSec - hiddenHeat * 0.004) +
+                        (ag.memberSlot % 3) * 0.18;
+                    }
+                  }
                 }
               }
             }
           } else if (ag.suspicion > 0.12 && playerPos) {
             // Glance toward player while suspicious
             ag.heading = Math.atan2(playerPos.x - ag.x, playerPos.z - ag.z);
+            const eyeY = ag.y + ag.eyeHeightM;
+            const pDist = Math.hypot(playerPos.x - ag.x, playerPos.z - ag.z);
+            const desiredPitch = THREE.MathUtils.clamp(
+              Math.atan2(playerPos.y + 1.15 - eyeY, Math.max(0.5, pDist)),
+              -0.45,
+              0.45
+            );
+            ag.aimPitch = THREE.MathUtils.damp(ag.aimPitch, desiredPitch, 8.0, safeDt);
             ag.aiming = ag.suspicion > 0.65;
+          } else {
+            ag.aimPitch = THREE.MathUtils.damp(ag.aimPitch, 0, 6.0, safeDt);
+          }
+
+          // Weapon state machine — patrol -> draw -> aim -> fire ->
+          // low_ready -> reload — mirroring the trace spec's table.
+          const sinceShot = elapsed - ag.lastShotElapsed;
+          const fireHoldSec = wSpec.pumpCycleSec > 0 ? 0.35 : 0.18;
+          if (ag.reloadTimer > 0) {
+            ag.weaponState = 'reload';
+          } else if (ag.hadFireLos && (ag.burstShotsLeft > 0 || sinceShot < fireHoldSec)) {
+            ag.weaponState = 'fire';
+          } else if (ag.hadFireLos && ag.drawFrac >= 0.72) {
+            const postBurstBreak =
+              !wSpec.sustainedFire &&
+              wSpec.burstCooldownSec > 0 &&
+              sinceShot >= 0.22 &&
+              sinceShot < 1.6 &&
+              ag.burstCooldown > 0.52;
+            ag.weaponState = postBurstBreak ? 'low_ready' : 'aim';
+          } else if (ag.aiming && ag.drawFrac >= 0.72) {
+            ag.weaponState = 'aim';
+          } else if (crew.state === 'alert' || crew.state === 'search') {
+            ag.weaponState = ag.drawFrac < 0.72 ? 'draw' : 'low_ready';
+          } else if (ag.suspicion > 0.03) {
+            ag.weaponState = ag.suspicion > 0.28 ? 'draw' : 'patrol';
+          } else {
+            ag.weaponState = 'patrol';
           }
         }
       } else if (ag.role === 'sidewalk') {
@@ -1955,7 +2106,7 @@ export function buildPedestrianSystem(
         if (rig) rig.root.visible = false;
         const gv = gangVisuals.get(i);
         if (gv) {
-          gv.weapon.visible = false;
+          if (gv.weapon) gv.weapon.visible = false;
           gv.suspicionSprite.visible = false;
         }
         continue;
@@ -2008,15 +2159,38 @@ export function buildPedestrianSystem(
         pedPoseParams.nodPitch = ag.nodTimer > 0 ? Math.sin(nodU * Math.PI) * 0.24 : 0;
         pedPoseParams.upsetProgress = upsetFrac;
         pedPoseParams.upsetLookYaw = glareDelta;
-        pedPoseParams.weaponPose = isGang ? (ag.aiming ? 'aim' : 'ready') : undefined;
+        // Armed gang members are posed by the IK weapon-hold layer right
+        // after the base pose, not by the simple weaponPose stub.
+        pedPoseParams.weaponPose = undefined;
         applyHumanPose(rig, pedPoseParams);
+        if (isGang) {
+          const gvPose = gangVisuals.get(i);
+          if (gvPose?.weaponRig) {
+            applyWeaponHoldPose(rig, gvPose.weaponRig, {
+              dt: safeDt,
+              elapsed,
+              phase: ag.idlePhase,
+              state: ag.weaponState,
+              detectionRamp: Math.max(
+                ag.suspicion,
+                crews[ag.crewIdx]?.state === 'alert' ? 0.85 : 0
+              ),
+              aimYawOffset: 0,
+              aimPitch: ag.aimPitch,
+              moveSpeedNorm: isWalking ? 0.55 : 0,
+              firedThisFrame: ag.weaponFired,
+              lightPool: muzzleLightPool,
+            });
+            ag.weaponFired = false;
+          }
+        }
       }
 
       // Sync gang member's shared weapon & filling "?" suspicion sprite above head
       if (isGang) {
         const gv = gangVisuals.get(i);
         if (gv) {
-          gv.weapon.visible = true;
+          if (gv.weapon) gv.weapon.visible = ag.alive;
           const crew = crews[ag.crewIdx];
           if (ag.alertBannerTimer > 0 && crew?.state === 'alert') {
             gv.suspicionSprite.visible = true;
