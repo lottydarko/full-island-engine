@@ -1,0 +1,502 @@
+[
+ {
+  "bodyId": "citizen-001",
+  "file": "citizen-001-rigged.glb",
+  "gender": "androgynous",
+  "ageBand": "adult",
+  "ancestry": "mixed",
+  "build": "default-average",
+  "heightM": 1.694,
+  "skinHex": "#A67048"
+ },
+ {
+  "bodyId": "citizen-002",
+  "file": "citizen-002.glb",
+  "gender": "male",
+  "ageBand": "middle-aged",
+  "ancestry": "caucasian",
+  "build": "broad-sturdy",
+  "heightM": 1.835,
+  "skinHex": "#8A5A3B"
+ },
+ {
+  "bodyId": "citizen-003",
+  "file": "citizen-003.glb",
+  "gender": "female",
+  "ageBand": "adult",
+  "ancestry": "caucasian",
+  "build": "sturdy",
+  "heightM": 1.73,
+  "skinHex": "#C89878"
+ },
+ {
+  "bodyId": "citizen-004",
+  "file": "citizen-004.glb",
+  "gender": "male",
+  "ageBand": "young-adult",
+  "ancestry": "asian",
+  "build": "slim",
+  "heightM": 1.783,
+  "skinHex": "#D9B48F"
+ },
+ {
+  "bodyId": "citizen-005",
+  "file": "citizen-005.glb",
+  "gender": "female",
+  "ageBand": "adult",
+  "ancestry": "caucasian",
+  "build": "average-soft",
+  "heightM": 1.674,
+  "skinHex": "#E8C39E"
+ },
+ {
+  "bodyId": "citizen-006",
+  "file": "citizen-006.glb",
+  "gender": "female",
+  "ageBand": "elder",
+  "ancestry": "caucasian",
+  "build": "stout-elder",
+  "heightM": 1.595,
+  "skinHex": "#DCB28C"
+ },
+ {
+  "bodyId": "citizen-007",
+  "file": "citizen-007.glb",
+  "gender": "male",
+  "ageBand": "adult",
+  "ancestry": "african",
+  "build": "average",
+  "heightM": 1.749,
+  "skinHex": "#6B4226"
+ },
+ {
+  "bodyId": "citizen-008",
+  "file": "citizen-008.glb",
+  "gender": "male",
+  "ageBand": "middle-aged",
+  "ancestry": "caucasian",
+  "build": "broad-sturdy",
+  "heightM": 1.91,
+  "skinHex": "#7A4A28"
+ },
+ {
+  "bodyId": "citizen-009",
+  "file": "citizen-009.glb",
+  "gender": "male",
+  "ageBand": "adult",
+  "ancestry": "caucasian",
+  "build": "heavy-limbed",
+  "heightM": 1.773,
+  "skinHex": "#5C3A21"
+ },
+ {
+  "bodyId": "citizen-010",
+  "file": "citizen-010.glb",
+  "gender": "female",
+  "ageBand": "middle-aged",
+  "ancestry": "caucasian",
+  "build": "sturdy",
+  "heightM": 1.747,
+  "skinHex": "#B07B54"
+ },
+ {
+  "bodyId": "citizen-011",
+  "file": "citizen-011.glb",
+  "gender": "male",
+  "ageBand": "middle-aged",
+  "ancestry": "caucasian",
+  "build": "broad-sturdy",
+  "heightM": 1.871,
+  "skinHex": "#9C6B43"
+ },
+ {
+  "bodyId": "citizen-012",
+  "file": "citizen-012.glb",
+  "gender": "male",
+  "ageBand": "adult",
+  "ancestry": "mixed",
+  "build": "sturdy-average",
+  "heightM": 1.748,
+  "skinHex": "#C08A5E"
+ },
+ {
+  "bodyId": "citizen-013",
+  "file": "citizen-013.glb",
+  "gender": "female",
+  "ageBand": "middle-aged",
+  "ancestry": "caucasian",
+  "build": "average",
+  "heightM": 1.651,
+  "skinHex": "#E0BFA0"
+ },
+ {
+  "bodyId": "citizen-014",
+  "file": "citizen-014.glb",
+  "gender": "male",
+  "ageBand": "adult",
+  "ancestry": "african",
+  "build": "lean-sturdy",
+  "heightM": 1.796,
+  "skinHex": "#4A2C17"
+ },
+ {
+  "bodyId": "citizen-015",
+  "file": "citizen-015.glb",
+  "gender": "female",
+  "ageBand": "young-adult",
+  "ancestry": "caucasian",
+  "build": "slim",
+  "heightM": 1.654,
+  "skinHex": "#EDD0AC"
+ },
+ {
+  "bodyId": "citizen-016",
+  "file": "citizen-016.glb",
+  "gender": "male",
+  "ageBand": "young-adult",
+  "ancestry": "asian",
+  "build": "slim-average",
+  "heightM": 1.815,
+  "skinHex": "#D9A066"
+ },
+ {
+  "bodyId": "citizen-017",
+  "file": "citizen-017.glb",
+  "gender": "female",
+  "ageBand": "young-adult",
+  "ancestry": "mixed",
+  "build": "slim",
+  "heightM": 1.687,
+  "skinHex": "#CFA06F"
+ },
+ {
+  "bodyId": "citizen-018",
+  "file": "citizen-018.glb",
+  "gender": "male",
+  "ageBand": "young-adult",
+  "ancestry": "caucasian",
+  "build": "slim",
+  "heightM": 1.741,
+  "skinHex": "#EAC9A8"
+ },
+ {
+  "bodyId": "citizen-019",
+  "file": "citizen-019.glb",
+  "gender": "female",
+  "ageBand": "young-adult",
+  "ancestry": "african",
+  "build": "average",
+  "heightM": 1.68,
+  "skinHex": "#86552E"
+ },
+ {
+  "bodyId": "citizen-020",
+  "file": "citizen-020.glb",
+  "gender": "male",
+  "ageBand": "adult",
+  "ancestry": "caucasian",
+  "build": "average-soft",
+  "heightM": 1.777,
+  "skinHex": "#E5C298"
+ },
+ {
+  "bodyId": "citizen-021",
+  "file": "citizen-021.glb",
+  "gender": "female",
+  "ageBand": "adult",
+  "ancestry": "asian",
+  "build": "lean",
+  "heightM": 1.64,
+  "skinHex": "#DDBB96"
+ },
+ {
+  "bodyId": "citizen-022",
+  "file": "citizen-022.glb",
+  "gender": "male",
+  "ageBand": "middle-aged",
+  "ancestry": "caucasian",
+  "build": "soft",
+  "heightM": 1.741,
+  "skinHex": "#A9744F"
+ },
+ {
+  "bodyId": "citizen-023",
+  "file": "citizen-023.glb",
+  "gender": "female",
+  "ageBand": "adult",
+  "ancestry": "caucasian",
+  "build": "average",
+  "heightM": 1.712,
+  "skinHex": "#D3A679"
+ },
+ {
+  "bodyId": "citizen-024",
+  "file": "citizen-024.glb",
+  "gender": "female",
+  "ageBand": "adult",
+  "ancestry": "caucasian",
+  "build": "trim",
+  "heightM": 1.692,
+  "skinHex": "#F0D7B8"
+ },
+ {
+  "bodyId": "citizen-025",
+  "file": "citizen-025.glb",
+  "gender": "male",
+  "ageBand": "adult",
+  "ancestry": "caucasian",
+  "build": "average-trim",
+  "heightM": 1.841,
+  "skinHex": "#B98A5F"
+ },
+ {
+  "bodyId": "citizen-026",
+  "file": "citizen-026.glb",
+  "gender": "female",
+  "ageBand": "adult",
+  "ancestry": "african",
+  "build": "average",
+  "heightM": 1.621,
+  "skinHex": "#93603C"
+ },
+ {
+  "bodyId": "citizen-027",
+  "file": "citizen-027.glb",
+  "gender": "female",
+  "ageBand": "elder",
+  "ancestry": "caucasian",
+  "build": "compact-elder",
+  "heightM": 1.558,
+  "skinHex": "#E3C29B"
+ },
+ {
+  "bodyId": "citizen-028",
+  "file": "citizen-028.glb",
+  "gender": "female",
+  "ageBand": "elder",
+  "ancestry": "caucasian",
+  "build": "stout-elder",
+  "heightM": 1.628,
+  "skinHex": "#D8AC7E"
+ },
+ {
+  "bodyId": "citizen-029",
+  "file": "citizen-029.glb",
+  "gender": "female",
+  "ageBand": "elder",
+  "ancestry": "caucasian",
+  "build": "frail-elder",
+  "heightM": 1.595,
+  "skinHex": "#EBCCA5"
+ },
+ {
+  "bodyId": "citizen-030",
+  "file": "citizen-030.glb",
+  "gender": "male",
+  "ageBand": "elder",
+  "ancestry": "caucasian",
+  "build": "elder-average",
+  "heightM": 1.723,
+  "skinHex": "#CBA27A"
+ },
+ {
+  "bodyId": "citizen-031",
+  "file": "citizen-031.glb",
+  "gender": "male",
+  "ageBand": "elder",
+  "ancestry": "caucasian",
+  "build": "elder-sturdy",
+  "heightM": 1.738,
+  "skinHex": "#AE8055"
+ },
+ {
+  "bodyId": "citizen-032",
+  "file": "citizen-032.glb",
+  "gender": "female",
+  "ageBand": "adult",
+  "ancestry": "caucasian",
+  "build": "average",
+  "heightM": 1.669,
+  "skinHex": "#E1B992"
+ },
+ {
+  "bodyId": "citizen-033",
+  "file": "citizen-033.glb",
+  "gender": "male",
+  "ageBand": "adult",
+  "ancestry": "asian",
+  "build": "average",
+  "heightM": 1.763,
+  "skinHex": "#BE8F63"
+ },
+ {
+  "bodyId": "citizen-034",
+  "file": "citizen-034.glb",
+  "gender": "female",
+  "ageBand": "middle-aged",
+  "ancestry": "mixed",
+  "build": "average-soft",
+  "heightM": 1.631,
+  "skinHex": "#6E4525"
+ },
+ {
+  "bodyId": "citizen-035",
+  "file": "citizen-035.glb",
+  "gender": "male",
+  "ageBand": "adult",
+  "ancestry": "caucasian",
+  "build": "lean-average",
+  "heightM": 1.808,
+  "skinHex": "#EDD2B0"
+ },
+ {
+  "bodyId": "citizen-036",
+  "file": "citizen-036.glb",
+  "gender": "female",
+  "ageBand": "adult",
+  "ancestry": "mixed",
+  "build": "average",
+  "heightM": 1.72,
+  "skinHex": "#D7AE84"
+ },
+ {
+  "bodyId": "citizen-037",
+  "file": "citizen-037.glb",
+  "gender": "female",
+  "ageBand": "young-adult",
+  "ancestry": "caucasian",
+  "build": "slender-toned",
+  "heightM": 1.737,
+  "skinHex": "#E9C6A2"
+ },
+ {
+  "bodyId": "citizen-038",
+  "file": "citizen-038.glb",
+  "gender": "female",
+  "ageBand": "adult",
+  "ancestry": "african",
+  "build": "toned-athletic",
+  "heightM": 1.703,
+  "skinHex": "#5F3A20"
+ },
+ {
+  "bodyId": "citizen-039",
+  "file": "citizen-039.glb",
+  "gender": "female",
+  "ageBand": "adult",
+  "ancestry": "caucasian",
+  "build": "tall-lean",
+  "heightM": 1.882,
+  "skinHex": "#F2DCC0"
+ },
+ {
+  "bodyId": "citizen-040",
+  "file": "citizen-040.glb",
+  "gender": "male",
+  "ageBand": "adult",
+  "ancestry": "caucasian",
+  "build": "tall-lean",
+  "heightM": 1.884,
+  "skinHex": "#CEA06B"
+ },
+ {
+  "bodyId": "citizen-041",
+  "file": "citizen-041.glb",
+  "gender": "female",
+  "ageBand": "young-adult",
+  "ancestry": "mixed",
+  "build": "tall-lean",
+  "heightM": 1.812,
+  "skinHex": "#DBB98F"
+ },
+ {
+  "bodyId": "citizen-042",
+  "file": "citizen-042.glb",
+  "gender": "male",
+  "ageBand": "adult",
+  "ancestry": "caucasian",
+  "build": "average-unremarkable",
+  "heightM": 1.75,
+  "skinHex": "#D6B48C"
+ },
+ {
+  "bodyId": "citizen-043",
+  "file": "citizen-043.glb",
+  "gender": "female",
+  "ageBand": "adult",
+  "ancestry": "caucasian",
+  "build": "average-unremarkable",
+  "heightM": 1.698,
+  "skinHex": "#C9A06F"
+ },
+ {
+  "bodyId": "citizen-044",
+  "file": "citizen-044.glb",
+  "gender": "male",
+  "ageBand": "adult",
+  "ancestry": "caucasian",
+  "build": "lean-wiry",
+  "heightM": 1.792,
+  "skinHex": "#9E6E45"
+ },
+ {
+  "bodyId": "citizen-045",
+  "file": "citizen-045.glb",
+  "gender": "male",
+  "ageBand": "adult",
+  "ancestry": "mixed",
+  "build": "street-muscular",
+  "heightM": 1.705,
+  "skinHex": "#7C4E2A"
+ },
+ {
+  "bodyId": "citizen-046",
+  "file": "citizen-046.glb",
+  "gender": "male",
+  "ageBand": "adult",
+  "ancestry": "caucasian",
+  "build": "broad-heavy",
+  "heightM": 1.909,
+  "skinHex": "#B08256"
+ },
+ {
+  "bodyId": "citizen-047",
+  "file": "citizen-047.glb",
+  "gender": "male",
+  "ageBand": "middle-aged",
+  "ancestry": "caucasian",
+  "build": "thick-set",
+  "heightM": 1.829,
+  "skinHex": "#75482A"
+ },
+ {
+  "bodyId": "citizen-048",
+  "file": "citizen-048.glb",
+  "gender": "male",
+  "ageBand": "middle-aged",
+  "ancestry": "caucasian",
+  "build": "solid-composed",
+  "heightM": 1.757,
+  "skinHex": "#C19A68"
+ },
+ {
+  "bodyId": "citizen-049",
+  "file": "citizen-049.glb",
+  "gender": "male",
+  "ageBand": "adult",
+  "ancestry": "caucasian",
+  "build": "fit-muscular",
+  "heightM": 1.855,
+  "skinHex": "#BB9066"
+ },
+ {
+  "bodyId": "citizen-050",
+  "file": "citizen-050.glb",
+  "gender": "male",
+  "ageBand": "adult",
+  "ancestry": "african",
+  "build": "tall-lean-athletic",
+  "heightM": 1.949,
+  "skinHex": "#54341C"
+ }
+]

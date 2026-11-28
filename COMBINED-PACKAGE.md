@@ -1,0 +1,31 @@
+# AGY BRIEF — THE COMBINED PACKAGE: INTEGRATION, LOCAL RUN, CHROMEBOOK OPTIMIZATION (Nov 27, 2026)
+
+## The package
+Repo github.com/lottydarko/full-island-engine, branch `muse/combined-2026-11-27` (off main @ 9d2b152). Clone the repo and check out that branch. It already contains, as files:
+- The island engine on main: city, traffic, metro, pedestrians, crimeDirector, gang engine, radio system, the arsenal (sharedWeapon + fpsWeaponView), signage, textures.
+- **The MakeHuman pool: all 50 rigged bodies + body-pool-manifest.json in `public/models/makehuman/`** — every body, including the six oversized ones (this is a local build; no Studio pull limits apply).
+- `src/sim/makehumanPool.ts` + `src/sim/kitWeapons.ts` (from weapons-preview: the pool loader and the FPS-kit gun port).
+- Behavior Phase 1: `src/sim/behaviorLabBench.ts`, `behaviorPoseLayers.ts`, `behaviorVignettes.ts`, `src/ui/BehaviorLab.tsx` — the nine staged vignettes (hold-up, surround, standoff, square-off, the tap, the scavenge, the drive-by, the van, the tail), grab points, the first-person snatch.
+- The wall-run lab: `src/lab/` (course, wallRunPhysics, engine) + `src/fps/` (the kit: hands with the tandem-elbow driver, legs, playerKit, weapons) — including its Xbox pad support.
+Verified at packaging: `npm run build` passes. `npm run lint` (tsc) shows 19 errors, ALL inside makehumanPool.ts — it expects the MPFB adapter on HumanRig (`mpfb` property) that the character finish adds. Step 1 below resolves them.
+
+## Target machine — Lotty's Chromebook, local run (Lotty's requirement)
+- This package runs LOCALLY on Lotty's Chromebook (Crostini). No cloud build, no Studio. Deliverable run modes: `npm run dev` for work, and the production `npm run build` output served locally for play tests.
+- **Optimization is a requirement, not a polish step.** The Chromebook is the target hardware: modest CPU/GPU, shared memory. Budget: hold the 314-agent cap, keep the frame at or under the character-finish benchmark (~23 ms/frame at cap on the old bodies — beat it or report honestly why not), no per-frame allocations in hot loops, shared geometry/materials for the pool bodies (identity is data, never per-agent geometry). Profile on the course and in a crowded street scene and report both numbers.
+
+## Integration order (do them in this order; report after each)
+1. **Character finish first.** If branch `agy/character-model-finish` exists, merge it into this branch (it carries the humanCharacter MPFB adapter + dressing at spawn). The makehumanPool tsc errors must go to zero. Pool bodies become the pedestrian source via the manifest (identity for life: bodyId, faceId, outfitId, fabricId, voiceSeed); dress at spawn — naked clay is a failed build.
+2. **Weapons states.** Merge `muse/weapons-lab-trace` (NPC weapon states for the new bodies). Kit guns from kitWeapons.ts are the player arsenal; enemy weapons are variations of them (black finish, red charging glow — enemy-only). No tracer lines for anyone.
+3. **Wall-run movement + the feel finish.** Wire src/lab + src/fps movement into the island first-person controller: wall-run, slide, ledge climb, and the agy-brief-wallrun-finish-2026-11-27.md work list (THE REALISTIC CLIMB cycle — reach/load/pull/mantle; CHAIN VELOCITY; LANDING RECOIL). All wall-run laws in STUDIO-BRIEF-wallrun-lab.md (in the wall-run-lab repo) apply.
+4. **Xbox controls across the whole game.** Port the wall-run lab's gamepad layer to every mode: driving, on foot, FPS, menus. Sprint = LS down, jump = A, the wall-run input law (jump onto wall while sprinting) included. Keyboard/mouse stays working.
+5. **CAR ENTRY LAW (Lotty, Nov 27, 2026):** the player cannot enter a car until he is near it. Entry is proximity-gated — including a called/summoned car: it can arrive, but he cannot get in from across the map; he must be at the car.
+6. **Behavior systems.** On top of the Phase 1 vignettes in the tree, build the living systems per ~/workspace/time-travel-fps/behavior-framework-2026-11-27.md and sleuth-system-design-2026-11-27.md (in this repo's docs or the behavior-lab repo): the instigation core in crimeDirector (SLEUTH = SYSTEM, CRIMINAL = OPPORTUNITY, POLICE = LAW, plus FACTION and REBEL), stalking (the tailing protocol: out of sight, quick-turn catch, queue position, waiting holds), drive-bys (faction grudges; the car slows to match your pace), and **the player kidnapping**: hidden heat threshold → the shoulder grab or the van → the first-person snatch (already staged) → bag over head → blackout loading → inside the program (interview, then the fight out; first kidnap = warning + release; dying inside = wake dumped at dawn). Consequences throughout: witnesses, hidden heat on worldEventBus, credentials + the intelligence database. NO HINTS — the core law of the sleuth design is not negotiable.
+7. **Radio + stations.** Register the new stations in the radio system: Вести Калуги 103.5 (news — design in radio-content/news-channel-design-2026-11-27.md on Muse's side; the bulletin bank lands in radio-content/news/), the classical station, and «Волна Запада». Content banks live outside the repo (radio-content/) and are wired as asset folders at this step.
+
+## Do not touch
+crimeDirector.ts and worldEventBus.ts are rewritten ONLY as step 6 directs. sharedWeapon.ts ballistics/spec unchanged. trafficSystem.ts bus destination code unchanged. zombieSystem stays as main has it.
+
+## Acceptance
+- tsc clean (zero errors) and build passes on the branch.
+- Runs locally on the Chromebook in both modes; frame cost reported at the 314 cap in a crowd and on the wall-run course.
+- A short report per step: what merged, what it cost, what is still unproven. Push the branch after each step. NO merge to main — Lotty merges.
